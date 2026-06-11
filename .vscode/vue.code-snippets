@@ -1,0 +1,17 @@
+{
+	"vue3 + ts 代码生成": {
+		"prefix": "vue",
+		"body": [
+			"<template>",
+			"\t<div class=\"$2\"></div>",
+			"</template>\n",
+			"<script setup lang=\"ts\">",
+			"defineOptions({",
+			"\tname: '${TM_FILENAME_BASE}$1',",
+			"})",
+			"</script>\n",
+			"<style scoped lang=\"scss\">$3</style>\n",
+		],
+		"description": "vue3 + ts 代码示例",
+	},
+}

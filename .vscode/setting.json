@@ -1,0 +1,12 @@
+{
+	"git.autofetch": true,
+	"editor.formatOnSave": true,
+	"editor.tabSize": 4,
+	"editor.quickSuggestionsDelay": 1,
+	"search.exclude": {
+		"**/bower_components": true,
+		"**/logs": true,
+		"**/node_modules": true,
+		"**/target": true
+	}
+}

@@ -1,0 +1,22 @@
+{
+	"git.autofetch": true,
+	"editor.tabSize": 4,
+	"editor.formatOnSave": true,
+	"search.exclude": {
+		"**/node_modules": true,
+		"**/bower_components": true,
+		"**/logs": true
+	},
+	"cSpell.words": [
+		"Analyse",
+		"Catmull",
+		"flyline",
+		"fuzhu",
+		"gltf",
+		"gxtype",
+		"lerp",
+		"ncolor",
+		"shuichang",
+		"Weixiu"
+	]
+}
