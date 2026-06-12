@@ -9,6 +9,10 @@
   },
   "dependencies": {
     "@amap/amap-jsapi-loader": "^1.0.1",
+    "@amap/three-layer": "^0.0.4",
+    "mapbox-gl": "^3.24.0",
+    "maptalks": "^1.12.1",
+    "three": "^0.184.0",
     "vue": "^3.2.25"
   },
   "devDependencies": {
