@@ -74,6 +74,10 @@ import {
 	type TreeResource,
 } from '../src/game/resources/trees'
 import {
+	createMonsterAnimationController,
+	type MonsterAnimationController,
+} from '../src/game/player/monster-animations'
+import {
 	createMonsterAgent,
 	createMonsterResources,
 	type MonsterAgent,
@@ -117,6 +121,7 @@ const envTemplates = new Map<string, Object3D>()
 let monsterResources: MonsterResource[] = []
 const monsterAgents: MonsterAgent[] = []
 const monsterObjects = new Map<string, Object3D>()
+const monsterAnimations = new Map<string, MonsterAnimationController>()
 
 const WORLD_RADIUS = TREE_RESOURCE_CONFIG.radiusMeters
 const PLAYER_START: PlanePoint = [0, 0]
@@ -300,6 +305,7 @@ function createMonsters(targetScene: Scene) {
 	monsterResources = createMonsterResources(MONSTER_CONFIG)
 	monsterAgents.length = 0
 	monsterObjects.clear()
+	monsterAnimations.clear()
 
 	// 每个怪物单独加载 GLB（蒙皮骨骼不能 clone）
 	monsterResources.forEach(m => {
@@ -322,7 +328,6 @@ function createMonsters(targetScene: Scene) {
 			error => console.error(`怪物模型加载失败：${modelUrl}`, error),
 		)
 	})
-}
 }
 
 function createPlayer(targetScene: Scene) {
@@ -402,9 +407,12 @@ function updateMonsters(delta: number, now: number) {
 	for (const agent of monsterAgents) {
 		agent.update(delta, now, playerAgent.position, true)
 		const obj = monsterObjects.get(agent.resource.id)
+		const anim = monsterAnimations.get(agent.resource.id)
 		if (!obj) continue
 		obj.position.set(agent.position[0], 0, agent.position[1])
 		obj.rotation.y = agent.bearing
+		anim?.play(agent.animation as any)
+		anim?.update(delta)
 	}
 }
 
@@ -712,6 +720,7 @@ function disposeScene() {
 	monsterResources = []
 	monsterAgents.length = 0
 	monsterObjects.clear()
+	monsterAnimations.clear()
 	fadingTrees.length = 0
 	deadTreeTemplates.clear()
 	liveTreeTemplates.clear()
