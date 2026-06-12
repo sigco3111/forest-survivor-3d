@@ -39,6 +39,7 @@ import {
 	WebGLRenderer,
 } from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import { PLAYER_CONFIG, TREE_RESOURCE_CONFIG } from '../src/config'
@@ -92,7 +93,7 @@ const treeObjects = new Map<string, Object3D>()
 
 const WORLD_RADIUS = TREE_RESOURCE_CONFIG.radiusMeters
 const PLAYER_START: PlanePoint = [0, 0]
-const CAMERA_OFFSET = new Vector3(0, 260, 360)
+const CAMERA_OFFSET = new Vector3(0, 180, 240)
 
 onMounted(() => {
 	createScene()
@@ -239,16 +240,35 @@ function createPlayer(targetScene: Scene) {
 		gltf => {
 			if (!playerState) return
 
-			const model = normalizeModel(gltf.scene)
-			model.rotation.y = MathUtils.degToRad(PLAYER_CONFIG.rotationY)
-			model.scale.multiplyScalar(PLAYER_CONFIG.scale)
+			const model = gltf.scene
+			const box = new Box3().setFromObject(model)
+			const size = box.getSize(new Vector3())
+			const center = box.getCenter(new Vector3())
+			const maxSize = Math.max(size.x, size.y, size.z) || 1
+
+			console.info('模型原始包围盒:', { size: size.toArray(), center: center.toArray(), maxSize })
+
+			// 居中 + 归一化到 1 单位 + 缩放到目标大小
+			model.position.sub(center)
+			model.scale.setScalar(PLAYER_CONFIG.scale / maxSize)
+			// 底部贴地
+			const newBox = new Box3().setFromObject(model)
+			model.position.y -= newBox.min.y
+
+			model.traverse(object => {
+				object.frustumCulled = false
+				if (object instanceof Mesh) {
+					object.castShadow = true
+					object.receiveShadow = true
+				}
+			})
+
 			playerRoot.add(model)
 			playerState.animation = createPlayerAnimationController(model, gltf.animations)
-			console.info(`玩家模型已加载：${PLAYER_CONFIG.url}`)
 		},
 		undefined,
 		error => {
-			console.error(`玩家模型加载失败：${PLAYER_CONFIG.url}`, error)
+			console.error('玩家模型加载失败:', error)
 		},
 	)
 }
@@ -391,7 +411,7 @@ function createNextPlayerTarget(position: PlanePoint): PlanePoint {
 }
 
 function normalizeModel(model: Object3D) {
-	const normalizedModel = model.clone(true)
+	const normalizedModel = cloneSkinned(model)
 	const bounds = new Box3().setFromObject(normalizedModel)
 	const size = bounds.getSize(new Vector3())
 	const center = bounds.getCenter(new Vector3())
