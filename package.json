@@ -8,10 +8,6 @@
     "build": "nuxt build"
   },
   "dependencies": {
-    "@amap/amap-jsapi-loader": "^1.0.1",
-    "@amap/three-layer": "^0.0.4",
-    "mapbox-gl": "^3.24.0",
-    "maptalks": "^1.12.1",
     "nuxt": "^3.21.8",
     "three": "^0.184.0",
     "unstorage": "^1.17.5",

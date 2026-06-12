@@ -1,5 +1,5 @@
 <template>
 	<ClientOnly>
-		<GameMap />
+		<GameScene />
 	</ClientOnly>
 </template>
