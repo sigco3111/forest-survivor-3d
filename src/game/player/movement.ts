@@ -1,7 +1,6 @@
 export type LngLat = [number, number]
 
 export type PlayerMovementConfig = {
-	getAvoidAreas?: () => LngLat[][]
 	initialTraveledMeters?: number
 	origin: LngLat
 	stepDistanceMeters: number
@@ -22,13 +21,13 @@ export function createPlayerMovement(config: PlayerMovementConfig): PlayerMoveme
 	const state: PlayerMovementState = {
 		bearing: 0,
 		position: [...config.origin],
-		target: createNextTarget(config.origin, config.stepDistanceMeters, config.getAvoidAreas),
+		target: createNextTarget(config.origin, config.stepDistanceMeters),
 		traveledMeters: config.initialTraveledMeters ?? 0,
 		update: delta => {
 			const distance = distanceMeters(state.position, state.target)
 
 			if (distance < 0.5) {
-				state.target = createNextTarget(state.position, config.stepDistanceMeters, config.getAvoidAreas)
+				state.target = createNextTarget(state.position, config.stepDistanceMeters)
 				return
 			}
 
@@ -45,43 +44,11 @@ export function createPlayerMovement(config: PlayerMovementConfig): PlayerMoveme
 function createNextTarget(
 	position: LngLat,
 	stepDistanceMeters: number,
-	getAvoidAreas: () => LngLat[][] = () => [],
 ): LngLat {
-	for (let attempt = 0; attempt < 24; attempt += 1) {
-		const minDistance = stepDistanceMeters * 0.55
-		const distance = minDistance + Math.random() * (stepDistanceMeters - minDistance)
-		const bearing = Math.random() * 360
-		const target = moveAlongBearing(position, bearing, distance)
-
-		if (!isInsidePolygons(target, getAvoidAreas())) {
-			return target
-		}
-	}
-
-	return moveAlongBearing(position, Math.random() * 360, stepDistanceMeters)
-}
-
-function isInsidePolygons(position: LngLat, polygons: LngLat[][]) {
-	return polygons.some(polygon => isInsidePolygon(position, polygon))
-}
-
-function isInsidePolygon(position: LngLat, polygon: LngLat[]) {
-	let inside = false
-	const [lng, lat] = position
-
-	for (let index = 0, previousIndex = polygon.length - 1; index < polygon.length; previousIndex = index++) {
-		const [currentLng, currentLat] = polygon[index]
-		const [previousLng, previousLat] = polygon[previousIndex]
-		const intersects =
-			currentLat > lat !== previousLat > lat &&
-			lng < ((previousLng - currentLng) * (lat - currentLat)) / (previousLat - currentLat) + currentLng
-
-		if (intersects) {
-			inside = !inside
-		}
-	}
-
-	return inside
+	const minDistance = stepDistanceMeters * 0.55
+	const distance = minDistance + Math.random() * (stepDistanceMeters - minDistance)
+	const bearing = Math.random() * 360
+	return moveAlongBearing(position, bearing, distance)
 }
 
 function moveAlongBearing(position: LngLat, bearing: number, distance: number): LngLat {

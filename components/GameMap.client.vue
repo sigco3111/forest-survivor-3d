@@ -6,25 +6,6 @@
 			<span>{{ gameDateLabel }}</span>
 			<strong>{{ gameTimeLabel }}</strong>
 			<small>行走 {{ playerTraveledMetersLabel }} 米</small>
-			<small>当前 {{ latestFootprintLabel }}</small>
-		</div>
-		<div class="footprint-panel">
-			<div class="footprint-panel__header">
-				<strong>足迹归档</strong>
-				<span>{{ footprintStatusLabel }}</span>
-			</div>
-			<ul v-if="footprints.length">
-				<li v-for="footprint in footprints.slice(0, 5)" :key="footprint.id">
-					<span>{{ footprint.gameTime }}</span>
-					<strong>{{ footprint.areaLabel }}</strong>
-				</li>
-			</ul>
-			<p v-else>等待玩家移动采样</p>
-			<div v-if="visitedAreas.length" class="visited-areas">
-				<span v-for="area in visitedAreas.slice(0, 4)" :key="area.id">
-					{{ area.label }} x{{ area.count }}
-				</span>
-			</div>
 		</div>
 	</div>
 </template>
@@ -35,7 +16,6 @@ import 'maptalks/dist/maptalks.css'
 
 import mapboxgl, {
 	type CustomLayerInterface,
-	type GeoJSONSource,
 	type Map as MapboxMap,
 	type ProjectionSpecification,
 } from 'mapbox-gl'
@@ -57,12 +37,10 @@ import {
 	WebGLRenderer,
 } from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 
-import { AMAP_CONFIG, GAME_TIME_CONFIG, MAP_CONFIG, MAPBOX_CONFIG, PLAYER_CONFIG } from '../src/config'
+import { GAME_TIME_CONFIG, MAP_CONFIG, MAPBOX_CONFIG, PLAYER_CONFIG } from '../src/config'
 import { applyGameTimeEnvironment } from '../src/game/environment'
-import { useExploredAreas, type ExploredArea } from '../src/game/exploration/areas'
-import { useFootprintArchive, type FootprintRecord } from '../src/game/location/footprints'
 import {
 	createPlayerAnimationController,
 	type PlayerAnimationController,
@@ -85,8 +63,6 @@ let mapboxMap: MapboxMap | null = null
 let playerLayer: PlayerModelLayer | null = null
 let explorePulseFrame = 0
 let playerMovement: PlayerMovementState | null = null
-let initialPlayerPosition: [number, number] = MAP_CONFIG.center
-let initialPlayerTraveledMeters = 0
 const gameTime = useGameTime(GAME_TIME_CONFIG)
 const gameDateLabel = gameTime.dateLabel
 const gameTimeLabel = gameTime.timeLabel
@@ -94,24 +70,6 @@ const playerTraveledMeters = ref(0)
 const playerTraveledMetersLabel = computed(() =>
 	Math.floor(playerTraveledMeters.value).toLocaleString('zh-CN'),
 )
-const footprintArchive = useFootprintArchive({
-	intervalSeconds: PLAYER_CONFIG.footprintRecordIntervalSeconds,
-	maxItems: PLAYER_CONFIG.footprintArchiveMaxItems,
-})
-const footprints = footprintArchive.footprints
-const visitedAreas = footprintArchive.visitedAreas
-const exploredAreaArchive = useExploredAreas({
-	closeDistanceMeters: PLAYER_CONFIG.exploredAreaCloseDistanceMeters,
-	minSquareMeters: PLAYER_CONFIG.exploredAreaMinSquareMeters,
-})
-const exploredAreas = exploredAreaArchive.areas
-const latestFootprintLabel = computed(() => footprintArchive.latestFootprint.value?.areaLabel || '定位中')
-const footprintStatusLabel = computed(() => {
-	if (footprintArchive.error.value) return footprintArchive.error.value
-	const exploredAreaCount = exploredAreas.value.length
-	const suffix = exploredAreaCount ? ` / ${exploredAreaCount} 区域` : ''
-	return footprintArchive.isResolving.value ? '计算中' : `${footprints.value.length} 条${suffix}`
-})
 
 class PlayerModelLayer implements CustomLayerInterface {
 	id = 'player-model'
@@ -131,8 +89,6 @@ class PlayerModelLayer implements CustomLayerInterface {
 		private readonly modelUrl: string,
 	) {
 		this.movement = createPlayerMovement({
-			getAvoidAreas: () => exploredAreas.value.map(area => area.coordinates),
-			initialTraveledMeters: initialPlayerTraveledMeters,
 			origin: position,
 			stepDistanceMeters: PLAYER_CONFIG.walkStepDistanceMeters,
 			speedMetersPerSecond: PLAYER_CONFIG.walkSpeedMetersPerSecond,
@@ -201,12 +157,6 @@ class PlayerModelLayer implements CustomLayerInterface {
 		const delta = this.clock.getDelta()
 		this.movement.update(delta)
 		playerTraveledMeters.value = this.movement.traveledMeters
-		footprintArchive.record(
-			this.movement.position,
-			this.movement.traveledMeters,
-			gameDateLabel.value,
-			gameTimeLabel.value,
-		)
 		this.playerAnimationController?.update(delta)
 		this.updateModelMatrix(this.movement.bearing)
 		this.camera.projectionMatrix = new Matrix4().fromArray(matrix).multiply(this.modelMatrix)
@@ -258,7 +208,7 @@ function createMaptalksShell() {
 	if (!maptalksContainer.value) return
 
 	maptalksMap = new maptalks.Map(maptalksContainer.value, {
-		center: initialPlayerPosition,
+		center: MAP_CONFIG.center,
 		zoom: MAP_CONFIG.zoom,
 		pitch: MAP_CONFIG.pitch,
 		bearing: MAP_CONFIG.bearing,
@@ -274,7 +224,7 @@ function createMapboxScene() {
 	mapboxMap = new mapboxgl.Map({
 		container: mapboxContainer.value,
 		style: MAPBOX_CONFIG.style,
-		center: initialPlayerPosition,
+		center: MAP_CONFIG.center,
 		zoom: MAP_CONFIG.zoom,
 		pitch: MAP_CONFIG.pitch,
 		bearing: MAP_CONFIG.bearing,
@@ -286,7 +236,7 @@ function createMapboxScene() {
 	mapboxMap.on('style.load', () => {
 		if (!mapboxMap) return
 
-		applyGameTimeEnvironment(mapboxMap, gameTime.hour.value, GAME_TIME_CONFIG)
+		applyGameTimeEnvironment(mapboxMap)
 
 		if (!mapboxMap.getSource(MAPBOX_CONFIG.terrainSource)) {
 			mapboxMap.addSource(MAPBOX_CONFIG.terrainSource, {
@@ -302,214 +252,10 @@ function createMapboxScene() {
 			exaggeration: MAPBOX_CONFIG.terrainExaggeration,
 		})
 
-		playerLayer = new PlayerModelLayer(initialPlayerPosition, PLAYER_CONFIG.url)
-		createFootprintTrail(mapboxMap)
-		createExploredAreaLayers(mapboxMap)
+		playerLayer = new PlayerModelLayer(MAP_CONFIG.center, PLAYER_CONFIG.url)
 		mapboxMap.addLayer(playerLayer)
 		createExplorePulse(mapboxMap)
 	})
-}
-
-function createExploredAreaLayers(map: MapboxMap) {
-	const sourceId = 'player-explored-areas'
-	const fillLayerId = 'player-explored-area-fill'
-	const lineLayerId = 'player-explored-area-line'
-
-	if (!map.getSource(sourceId)) {
-		map.addSource(sourceId, {
-			type: 'geojson',
-			data: createExploredAreaFeatureCollection(exploredAreas.value),
-		})
-	}
-
-	if (!map.getLayer(fillLayerId)) {
-		map.addLayer({
-			id: fillLayerId,
-			type: 'fill',
-			source: sourceId,
-			paint: {
-				'fill-color': PLAYER_CONFIG.exploredAreaColor,
-				'fill-opacity': 0.12,
-			},
-		})
-	}
-
-	if (!map.getLayer(lineLayerId)) {
-		map.addLayer({
-			id: lineLayerId,
-			type: 'line',
-			source: sourceId,
-			paint: {
-				'line-color': PLAYER_CONFIG.exploredAreaColor,
-				'line-opacity': 0.42,
-				'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1, 16, 2.5],
-				'line-dasharray': [1.6, 1.2],
-			},
-		})
-	}
-
-	updateExploredAreaLayers()
-}
-
-function updateExploredAreaLayers() {
-	const source = mapboxMap?.getSource('player-explored-areas') as GeoJSONSource | undefined
-	source?.setData(createExploredAreaFeatureCollection(exploredAreas.value))
-}
-
-function createExploredAreaFeatureCollection(areas: ExploredArea[]) {
-	return {
-		type: 'FeatureCollection' as const,
-		features: areas.map((area, index) => ({
-			type: 'Feature' as const,
-			properties: {
-				id: area.id,
-				order: index + 1,
-				areaSquareMeters: Math.round(area.areaSquareMeters),
-			},
-			geometry: {
-				type: 'Polygon' as const,
-				coordinates: [area.coordinates],
-			},
-		})),
-	}
-}
-
-function createFootprintTrail(map: MapboxMap) {
-	const sourceId = 'player-footprints'
-	const lineLayerId = 'player-footprint-line'
-	const pointHaloLayerId = 'player-footprint-point-halo'
-	const pointLayerId = 'player-footprint-point'
-	const labelLayerId = 'player-footprint-label'
-
-	if (!map.getSource(sourceId)) {
-		map.addSource(sourceId, {
-			type: 'geojson',
-			data: createFootprintFeatureCollection(footprints.value),
-		})
-	}
-
-	if (!map.getLayer(lineLayerId)) {
-		map.addLayer({
-			id: lineLayerId,
-			type: 'line',
-			source: sourceId,
-			filter: ['==', ['geometry-type'], 'LineString'],
-			layout: {
-				'line-cap': 'round',
-				'line-join': 'round',
-			},
-			paint: {
-				'line-color': PLAYER_CONFIG.footprintTrailColor,
-				'line-opacity': 0.34,
-				'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1, 16, 2.6],
-			},
-		})
-	}
-
-	if (!map.getLayer(pointHaloLayerId)) {
-		map.addLayer({
-			id: pointHaloLayerId,
-			type: 'circle',
-			source: sourceId,
-			filter: ['==', ['geometry-type'], 'Point'],
-			paint: {
-				'circle-color': PLAYER_CONFIG.footprintTrailColor,
-				'circle-opacity': 0.08,
-				'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 5, 16, 10],
-				'circle-stroke-color': PLAYER_CONFIG.footprintTrailColor,
-				'circle-stroke-opacity': 0.18,
-				'circle-stroke-width': 1,
-			},
-		})
-	}
-
-	if (!map.getLayer(pointLayerId)) {
-		map.addLayer({
-			id: pointLayerId,
-			type: 'circle',
-			source: sourceId,
-			filter: ['==', ['geometry-type'], 'Point'],
-			paint: {
-				'circle-color': PLAYER_CONFIG.footprintPointColor,
-				'circle-opacity': 0.55,
-				'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 16, 4],
-				'circle-stroke-color': '#061622',
-				'circle-stroke-opacity': 0.42,
-				'circle-stroke-width': 1,
-			},
-		})
-	}
-
-	if (!map.getLayer(labelLayerId)) {
-		map.addLayer({
-			id: labelLayerId,
-			type: 'symbol',
-			source: sourceId,
-			filter: ['==', ['geometry-type'], 'Point'],
-			layout: {
-				'text-field': ['get', 'label'],
-				'text-font': ['DIN Pro Medium', 'Arial Unicode MS Regular'],
-				'text-size': 10,
-				'text-offset': [0, 1.2],
-				'text-anchor': 'top',
-				'text-allow-overlap': false,
-			},
-			paint: {
-				'text-color': '#a8dce4',
-				'text-opacity': 0.48,
-				'text-halo-color': '#061622',
-				'text-halo-width': 0.8,
-			},
-		})
-	}
-
-	updateFootprintTrail()
-}
-
-function updateFootprintTrail() {
-	const source = mapboxMap?.getSource('player-footprints') as GeoJSONSource | undefined
-	source?.setData(createFootprintFeatureCollection(footprints.value))
-}
-
-function createFootprintFeatureCollection(records: FootprintRecord[]) {
-	const orderedRecords = [...records].reverse()
-	const coordinates = orderedRecords.map(record => record.position)
-	const features = orderedRecords.map((record, index) => ({
-		type: 'Feature' as const,
-		properties: {
-			id: record.id,
-			label: record.gameTime,
-			order: index + 1,
-			area: record.areaLabel,
-			traveledMeters: Math.floor(record.traveledMeters),
-		},
-		geometry: {
-			type: 'Point' as const,
-			coordinates: record.position,
-		},
-	}))
-
-	if (coordinates.length > 1) {
-		features.unshift({
-			type: 'Feature' as const,
-			properties: {
-				id: 'footprint-path',
-				label: '',
-				order: 0,
-				area: '',
-				traveledMeters: 0,
-			},
-			geometry: {
-				type: 'LineString' as const,
-				coordinates,
-			},
-		})
-	}
-
-	return {
-		type: 'FeatureCollection' as const,
-		features,
-	}
 }
 
 function createExplorePulse(map: MapboxMap) {
@@ -616,38 +362,10 @@ function createCircleFeature(center: [number, number], radiusMeters: number) {
 	}
 }
 
-onMounted(async () => {
-	window._AMapSecurityConfig = {
-		securityJsCode: AMAP_CONFIG.securityJsCode,
-	}
-
-	await footprintArchive.load()
-	const latestFootprint = footprints.value[0]
-	if (latestFootprint) {
-		initialPlayerPosition = latestFootprint.position
-		initialPlayerTraveledMeters = latestFootprint.traveledMeters
-		playerTraveledMeters.value = latestFootprint.traveledMeters
-		exploredAreaArchive.updateFromFootprints(footprints.value)
-	}
-
+onMounted(() => {
 	createMaptalksShell()
 	createMapboxScene()
 	gameTime.start()
-})
-
-watch(gameTime.isDaytime, () => {
-	if (mapboxMap) {
-		applyGameTimeEnvironment(mapboxMap, gameTime.hour.value, GAME_TIME_CONFIG)
-	}
-})
-
-watch(footprints, () => {
-	exploredAreaArchive.updateFromFootprints(footprints.value)
-	updateFootprintTrail()
-})
-
-watch(exploredAreas, () => {
-	updateExploredAreaLayers()
 })
 
 onUnmounted(() => {
@@ -729,100 +447,7 @@ onUnmounted(() => {
 	white-space: nowrap;
 }
 
-.footprint-panel {
-	position: absolute;
-	z-index: 3;
-	right: 20px;
-	bottom: 20px;
-	display: grid;
-	gap: 10px;
-	width: min(360px, calc(100vw - 40px));
-	padding: 12px 14px;
-	color: #d9fbff;
-	background: rgb(3 16 28 / 72%);
-	border: 1px solid rgb(74 224 255 / 38%);
-	box-shadow: 0 0 24px rgb(34 220 255 / 15%), inset 0 0 18px rgb(34 220 255 / 8%);
-	backdrop-filter: blur(10px);
-}
-
-.footprint-panel__header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 12px;
-}
-
-.footprint-panel__header strong {
-	font-size: 14px;
-	line-height: 1;
-}
-
-.footprint-panel__header span,
-.footprint-panel p {
-	margin: 0;
-	font-size: 12px;
-	line-height: 1.4;
-	color: #80e5ef;
-}
-
-.footprint-panel ul {
-	display: grid;
-	gap: 8px;
-	padding: 0;
-	margin: 0;
-	list-style: none;
-}
-
-.footprint-panel li {
-	display: grid;
-	grid-template-columns: 58px minmax(0, 1fr);
-	gap: 8px;
-	align-items: start;
-	min-height: 20px;
-	font-size: 12px;
-	line-height: 1.35;
-}
-
-.footprint-panel li span {
-	color: #80e5ef;
-	font-variant-numeric: tabular-nums;
-}
-
-.footprint-panel li strong {
-	overflow: hidden;
-	color: #e8feff;
-	font-weight: 500;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.visited-areas {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 6px;
-}
-
-.visited-areas span {
-	max-width: 100%;
-	padding: 4px 7px;
-	overflow: hidden;
-	font-size: 11px;
-	line-height: 1.2;
-	color: #b9f4fa;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	background: rgb(53 244 255 / 10%);
-	border: 1px solid rgb(53 244 255 / 22%);
-}
-
 @media (max-width: 640px) {
-	.footprint-panel {
-		right: 12px;
-		bottom: 12px;
-		left: 12px;
-		width: auto;
-	}
-
 	.game-time {
 		top: 12px;
 		left: 12px;

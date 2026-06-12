@@ -36,13 +36,6 @@ export const PLAYER_CONFIG = {
 	walkSpeedMetersPerSecond: 18,
 	explorePulseDurationMs: 2400,
 	explorePulseColor: '#35f4ff',
-	footprintRecordIntervalSeconds: 4,
-	footprintArchiveMaxItems: 20,
-	footprintTrailColor: '#6dcbd8',
-	footprintPointColor: '#b8eef3',
-	exploredAreaMinSquareMeters: 1200,
-	exploredAreaCloseDistanceMeters: 35,
-	exploredAreaColor: '#45d6b5',
 }
 
 // 游戏时间配置：现实 1 秒会推进 speedMultiplier 秒游戏时间。
