@@ -51,6 +51,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
 	DEAD_TREE_CONFIG,
 	ENVIRONMENT_CONFIG,
+	MONSTER_CONFIG,
 	PLAYER_CONFIG,
 	TREE_RESOURCE_CONFIG,
 } from '../src/config'
@@ -72,6 +73,12 @@ import {
 	type PlanePoint,
 	type TreeResource,
 } from '../src/game/resources/trees'
+import {
+	createMonsterAgent,
+	createMonsterResources,
+	type MonsterAgent,
+	type MonsterResource,
+} from '../src/game/resources/monsters'
 
 defineOptions({
 	name: 'GameScene',
@@ -107,6 +114,9 @@ const treeObjects = new Map<string, Object3D>()
 const fadingTrees: { object: Object3D; createdAt: number }[] = []
 let environmentObjects: EnvironmentObject[] = []
 const envTemplates = new Map<string, Object3D>()
+let monsterResources: MonsterResource[] = []
+const monsterAgents: MonsterAgent[] = []
+const monsterObjects = new Map<string, Object3D>()
 
 const WORLD_RADIUS = TREE_RESOURCE_CONFIG.radiusMeters
 const PLAYER_START: PlanePoint = [0, 0]
@@ -159,6 +169,7 @@ function createScene() {
 	addEnvironment(scene)
 	createTrees(scene)
 	createEnvObjects(scene)
+	createMonsters(scene)
 	createPlayer(scene)
 	window.addEventListener('resize', handleResize)
 	animationFrame = window.requestAnimationFrame(renderFrame)
@@ -285,6 +296,35 @@ function createEnvObjects(targetScene: Scene) {
 	})
 }
 
+function createMonsters(targetScene: Scene) {
+	monsterResources = createMonsterResources(MONSTER_CONFIG)
+	monsterAgents.length = 0
+	monsterObjects.clear()
+
+	// 每个怪物单独加载 GLB（蒙皮骨骼不能 clone）
+	monsterResources.forEach(m => {
+		const modelUrl = MONSTER_CONFIG.modelUrls[m.modelIndex]
+		new GLTFLoader().load(
+			modelUrl,
+			gltf => {
+				if (monsterObjects.has(m.id)) return
+
+				const wrapper = new Group()
+				const model = normalizeModel(gltf.scene, MONSTER_CONFIG.modelScale, false)
+				model.rotation.y = m.rotation
+				wrapper.add(model)
+				wrapper.position.set(m.position[0], 0, m.position[1])
+				targetScene.add(wrapper)
+				monsterObjects.set(m.id, wrapper)
+				monsterAgents.push(createMonsterAgent(m))
+			},
+			undefined,
+			error => console.error(`怪物模型加载失败：${modelUrl}`, error),
+		)
+	})
+}
+}
+
 function createPlayer(targetScene: Scene) {
 	const playerRoot = new Group()
 	playerRoot.position.set(PLAYER_START[0], 0, PLAYER_START[1])
@@ -344,6 +384,7 @@ function renderFrame() {
 	
 
 	updateFadingTrees()
+	updateMonsters(delta, now)
 	playerAnimation?.update(delta)
 	updateCamera()
 	renderer.render(scene, camera)
@@ -354,6 +395,17 @@ function syncPlayerVisuals() {
 	if (!playerAgent || !playerModel) return
 	playerModel.position.set(playerAgent.position[0], 0, playerAgent.position[1])
 	playerModel.rotation.y = playerAgent.bearing + MathUtils.degToRad(PLAYER_CONFIG.rotationY)
+}
+
+function updateMonsters(delta: number, now: number) {
+	if (!playerAgent) return
+	for (const agent of monsterAgents) {
+		agent.update(delta, now, playerAgent.position, true)
+		const obj = monsterObjects.get(agent.resource.id)
+		if (!obj) continue
+		obj.position.set(agent.position[0], 0, agent.position[1])
+		obj.rotation.y = agent.bearing
+	}
 }
 
 function checkCollision(position: PlanePoint): boolean {
@@ -544,6 +596,15 @@ function drawMinimap() {
 		ctx.fill()
 	}
 
+	// 怪物（红色点）
+	ctx.fillStyle = '#ff4444'
+	for (const agent of monsterAgents) {
+		if (agent.resource.health <= 0) continue
+		ctx.beginPath()
+		ctx.arc(toX(agent.position[0]), toY(agent.position[1]), 3, 0, Math.PI * 2)
+		ctx.fill()
+	}
+
 	// 玩家位置 + 朝向
 	const px = toX(playerAgent.position[0])
 	const py = toY(playerAgent.position[1])
@@ -648,6 +709,9 @@ function disposeScene() {
 	treeGroup = null
 	treeResources = []
 	environmentObjects = []
+	monsterResources = []
+	monsterAgents.length = 0
+	monsterObjects.clear()
 	fadingTrees.length = 0
 	deadTreeTemplates.clear()
 	liveTreeTemplates.clear()

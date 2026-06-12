@@ -22,16 +22,16 @@ export const TREE_RESOURCE_CONFIG = {
   gridSize: 42,
   densityThreshold: 0.36,
   noiseScale: 0.12,
-  maxTrees: 48,
+  maxTrees: 48, // 最大树木数量
   modelScale: 14,
   woodPerTree: 3,
 };
 
 // 枯树消失与重生配置
 export const DEAD_TREE_CONFIG = {
-  lingerMs: 10000,
-  fadeMs: 2000,
-  respawnMinSpacing: 80,
+  lingerMs: 5000, // 枯树持续时间：5 秒
+  fadeMs: 2000, // 枯树淡出时间
+  respawnMinSpacing: 80, // 新树与最近树的最小间距
 };
 
 // 环境障碍物配置：flower/grass/plant 随机散落，玩家不可穿过。
@@ -42,8 +42,32 @@ export const ENVIRONMENT_CONFIG = {
     plant: ["/models/environment/plant/1.glb", "/models/environment/plant/2.glb"],
   },
   seed: 4200,
-  count: 200,
+  count: 200, // 环境物总数量
   radiusMeters: 900,
   scaleRange: [3, 8] as [number, number],
   collisionRadius: 6,
+};
+
+// 怪物配置：巡逻+追击 AI
+export const MONSTER_CONFIG = {
+  modelUrls: [
+    "/models/monster/1.glb",
+    "/models/monster/Giant.glb",
+    "/models/monster/Goblin.glb",
+    "/models/monster/Skeleton.glb",
+    "/models/monster/Yeti.glb",
+    "/models/monster/Zombie.glb",
+  ],
+  seed: 7300,
+  count: 15, // 怪物总数量
+  radiusMeters: 900,
+  modelScale: 6,
+  scaleRange: [0.8, 1.2] as [number, number],
+  patrolRadius: 80,
+  speed: 30,
+  detectionRadius: 120,
+  attackRadius: 20,
+  health: 100,
+  attackDamage: 10,
+  attackCooldownMs: 1500,
 };
