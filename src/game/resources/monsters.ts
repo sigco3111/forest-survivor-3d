@@ -142,7 +142,7 @@ function updateIdle(agent: MonsterAgent, delta: number, distToPlayer: number, pl
 	}
 
 	agent.stateTimer += delta
-	if (agent.stateTimer > 2 + Math.random() * 3) {
+	if (agent.stateTimer > 3) {
 		agent.stateTimer = 0
 		agent.state = 'patrol'
 		agent.animation = 'walk'
