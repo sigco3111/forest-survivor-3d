@@ -1,6 +1,6 @@
 // 地图初始视角配置：中心点、缩放、俯仰和旋转角度。
 export const MAP_CONFIG = {
-	center: [114.933, 25.831] as [number, number],
+	center: [120.1551, 30.2741] as [number, number],
 	zoom: 15.8,
 	pitch: 64,
 	bearing: -18,
@@ -29,12 +29,27 @@ export const PLAYER_CONFIG = {
 	terrainOffset: -30,
 	rotationY: 180,
 	headingOffset: 180,
-	walkRadiusMeters: 220,
+	shadowOpacity: 0.58,
+	shadowRadius: 90,
+	walkStepDistanceMeters: 220,
+	explorePulseRadiusMeters: 220,
 	walkSpeedMetersPerSecond: 18,
+	explorePulseDurationMs: 2400,
+	explorePulseColor: '#35f4ff',
+	footprintRecordIntervalSeconds: 4,
+	footprintArchiveMaxItems: 20,
+	footprintTrailColor: '#6dcbd8',
+	footprintPointColor: '#b8eef3',
+	exploredAreaMinSquareMeters: 1200,
+	exploredAreaCloseDistanceMeters: 35,
+	exploredAreaColor: '#45d6b5',
 }
 
 // 游戏时间配置：现实 1 秒会推进 speedMultiplier 秒游戏时间。
 export const GAME_TIME_CONFIG = {
+	startYear: 2100,
+	daysPerYear: 365,
+	initialDay: 1,
 	initialHour: 14,
 	initialMinute: 0,
 	speedMultiplier: 1000,

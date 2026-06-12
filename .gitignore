@@ -1,54 +1,30 @@
-# Built application files
-*.apk
-*.ap_
-
-# Files for the Dalvik VM
-*.dex
-
-# Generated files
-*/bin/
-*/gen/
-*/out/
-
-# Log Files
-*.log
-
-# Android Studio
-.navigation/
-captures/
-
-# idea
-*/.idea/
-.idea/
-*.iml
-*/*.iml
-
-# eclipse
-.project
-.factorypath
-.classpath
-.settings/
-target/
-logs/
-
-# web
+# Nuxt dev/build outputs
+.nuxt/
+.nuxt-app/
+.nuxt-app-build/
+.output/
 dist/
+output/
+.vite-cache/
+.vendor/
+.tmp/*
+!.tmp/.gitkeep
+
+# Node
 node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+*.log*
 
+# Env
+.env
 
-# others
-*/.DS_Store
+# Database
+data/
+
+# IDE
+.codex/
+.vscode/
+.idea/
+
+# OS
 .DS_Store
-
-# Editor directories and files
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-
-typings/autoImport.d.ts
-typings/components.d.ts
-build/.eslintrc-auto-import.json
+Thumbs.db

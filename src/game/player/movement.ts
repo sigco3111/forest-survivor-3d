@@ -1,8 +1,10 @@
 export type LngLat = [number, number]
 
 export type PlayerMovementConfig = {
+	getAvoidAreas?: () => LngLat[][]
+	initialTraveledMeters?: number
 	origin: LngLat
-	radiusMeters: number
+	stepDistanceMeters: number
 	speedMetersPerSecond: number
 }
 
@@ -10,6 +12,7 @@ export type PlayerMovementState = {
 	bearing: number
 	position: LngLat
 	target: LngLat
+	traveledMeters: number
 	update: (delta: number) => void
 }
 
@@ -19,17 +22,19 @@ export function createPlayerMovement(config: PlayerMovementConfig): PlayerMoveme
 	const state: PlayerMovementState = {
 		bearing: 0,
 		position: [...config.origin],
-		target: createRandomTarget(config.origin, config.radiusMeters),
+		target: createNextTarget(config.origin, config.stepDistanceMeters, config.getAvoidAreas),
+		traveledMeters: config.initialTraveledMeters ?? 0,
 		update: delta => {
 			const distance = distanceMeters(state.position, state.target)
 
 			if (distance < 0.5) {
-				state.target = createRandomTarget(config.origin, config.radiusMeters)
+				state.target = createNextTarget(state.position, config.stepDistanceMeters, config.getAvoidAreas)
 				return
 			}
 
 			state.bearing = bearingDegrees(state.position, state.target)
 			const travelDistance = Math.min(distance, config.speedMetersPerSecond * delta)
+			state.traveledMeters += travelDistance
 			state.position = moveAlongBearing(state.position, state.bearing, travelDistance)
 		},
 	}
@@ -37,10 +42,46 @@ export function createPlayerMovement(config: PlayerMovementConfig): PlayerMoveme
 	return state
 }
 
-function createRandomTarget(origin: LngLat, radiusMeters: number): LngLat {
-	const distance = Math.sqrt(Math.random()) * radiusMeters
-	const bearing = Math.random() * 360
-	return moveAlongBearing(origin, bearing, distance)
+function createNextTarget(
+	position: LngLat,
+	stepDistanceMeters: number,
+	getAvoidAreas: () => LngLat[][] = () => [],
+): LngLat {
+	for (let attempt = 0; attempt < 24; attempt += 1) {
+		const minDistance = stepDistanceMeters * 0.55
+		const distance = minDistance + Math.random() * (stepDistanceMeters - minDistance)
+		const bearing = Math.random() * 360
+		const target = moveAlongBearing(position, bearing, distance)
+
+		if (!isInsidePolygons(target, getAvoidAreas())) {
+			return target
+		}
+	}
+
+	return moveAlongBearing(position, Math.random() * 360, stepDistanceMeters)
+}
+
+function isInsidePolygons(position: LngLat, polygons: LngLat[][]) {
+	return polygons.some(polygon => isInsidePolygon(position, polygon))
+}
+
+function isInsidePolygon(position: LngLat, polygon: LngLat[]) {
+	let inside = false
+	const [lng, lat] = position
+
+	for (let index = 0, previousIndex = polygon.length - 1; index < polygon.length; previousIndex = index++) {
+		const [currentLng, currentLat] = polygon[index]
+		const [previousLng, previousLat] = polygon[previousIndex]
+		const intersects =
+			currentLat > lat !== previousLat > lat &&
+			lng < ((previousLng - currentLng) * (lat - currentLat)) / (previousLat - currentLat) + currentLng
+
+		if (intersects) {
+			inside = !inside
+		}
+	}
+
+	return inside
 }
 
 function moveAlongBearing(position: LngLat, bearing: number, distance: number): LngLat {
