@@ -9,9 +9,7 @@ export type PlayerAnimationName =
 	| 'death'
 	| 'idle'
 	| 'interact'
-	| 'roll'
 	| 'run'
-	| 'sword_slash'
 	| 'walk'
 	| 'wave'
 
@@ -23,22 +21,18 @@ export type PlayerAnimationController = {
 
 const PLAYER_ANIMATION_INDEX: Record<PlayerAnimationName, number> = {
 	death: 0,
-	idle: 0,
+	idle: 3,
 	interact: 10,
-	roll: 15,
-	run: 1,
-	sword_slash: 21,
-	walk: 3,
-	wave: 23,
+	run: 11,
+	walk: 14,
+	wave: 16,
 }
 
 const PLAYER_ANIMATION_PATTERN: Record<PlayerAnimationName, RegExp> = {
 	death: /(?:^|\|)death$/i,
 	idle: /(?:^|\|)idle$/i,
 	interact: /(?:^|\|)(?:interact|punch|idle_attack)$/i,
-	roll: /(?:^|\|)roll$/i,
 	run: /(?:^|\|)run$/i,
-	sword_slash: /(?:^|\|)sword_slash$/i,
 	walk: /(?:^|\|)walk$/i,
 	wave: /(?:^|\|)wave$/i,
 }
@@ -49,13 +43,11 @@ export function createPlayerAnimationController(
 	defaultAnimation: PlayerAnimationName = 'walk',
 ): PlayerAnimationController {
 	const mixer = new AnimationMixer(model)
-	const actions = {
+	const actions: Record<PlayerAnimationName, AnimationAction | null> = {
 		death: createAction(mixer, animations, 'death'),
 		idle: createAction(mixer, animations, 'idle'),
 		interact: createAction(mixer, animations, 'interact'),
-		roll: createAction(mixer, animations, 'roll'),
 		run: createAction(mixer, animations, 'run'),
-		sword_slash: createAction(mixer, animations, 'sword_slash'),
 		walk: createAction(mixer, animations, 'walk'),
 		wave: createAction(mixer, animations, 'wave'),
 	}

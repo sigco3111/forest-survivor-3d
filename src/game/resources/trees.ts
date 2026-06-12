@@ -1,3 +1,5 @@
+import { createNoise2D } from 'simplex-noise'
+
 export type PlanePoint = [number, number]
 
 export type TreeResource = {
@@ -11,7 +13,7 @@ export type TreeResource = {
 	collected: boolean
 }
 
-export type TreeResourceConfig = {
+type TreeResourceConfig = {
 	densityThreshold: number
 	deadModelUrls: string[]
 	gridSize: number
@@ -25,15 +27,23 @@ export type TreeResourceConfig = {
 }
 
 const SQRT_3_HALF = Math.sqrt(3) / 2
-const NOISE_OCTAVES = [
-	{ frequency: 1, amplitude: 0.58 },
-	{ frequency: 2.1, amplitude: 0.28 },
-	{ frequency: 4.3, amplitude: 0.14 },
-]
+
+function seededRandom(seed: number) {
+	let s = seed
+	return () => {
+		s = (s * 16807 + 0) % 2147483647
+		return (s - 1) / 2147483646
+	}
+}
 
 export function createNoiseTrees(config: TreeResourceConfig): TreeResource[] {
 	const trees: TreeResource[] = []
 	const halfGrid = Math.floor(config.gridSize / 2)
+	const noise2d = createNoise2D(seededRandom(config.seed))
+	const jitter = createNoise2D(seededRandom(config.seed + 101))
+	const rotation = createNoise2D(seededRandom(config.seed + 202))
+	const scaleNoise = createNoise2D(seededRandom(config.seed + 303))
+	const modelNoise = createNoise2D(seededRandom(config.seed + 404))
 
 	for (let row = -halfGrid; row <= halfGrid; row += 1) {
 		for (let column = -halfGrid; column <= halfGrid; column += 1) {
@@ -43,31 +53,26 @@ export function createNoiseTrees(config: TreeResourceConfig): TreeResource[] {
 
 			if (distance > config.radiusMeters) continue
 
-			const noise = fractalNoise(
-				column * config.noiseScale,
-				row * config.noiseScale,
-				config.seed,
-			)
+			// 用 simplex noise 生成密度
+			const n = noise2d(column * config.noiseScale, row * config.noiseScale)
+			const density = (n + 1) * 0.5 // simplex 返回 [-1, 1]，映射到 [0, 1]
 			const edgeFalloff = 1 - Math.max(0, distance / config.radiusMeters - 0.72) / 0.28
-			const density = noise * Math.max(0, Math.min(1, edgeFalloff))
+			const finalDensity = density * Math.max(0, Math.min(1, edgeFalloff))
 
-			if (density < config.densityThreshold) continue
+			if (finalDensity < config.densityThreshold) continue
 
-			const jitterAngle = random2D(column, row, config.seed + 101) * Math.PI * 2
-			const jitterRadius = random2D(column, row, config.seed + 202) * 18
-			const modelIndex = Math.floor(random2D(column, row, config.seed + 303) * config.modelUrls.length)
+			const jx = jitter(column * 0.7, row * 0.7) * 18
+			const jz = jitter(column * 0.7 + 100, row * 0.7 + 100) * 18
+			const modelIndex = Math.floor((modelNoise(column * 0.5, row * 0.5) + 1) * 0.5 * config.modelUrls.length)
 
 			trees.push({
 				id: `tree-${row + halfGrid}-${column + halfGrid}`,
 				modelIndex: Math.min(config.modelUrls.length - 1, modelIndex),
-				position: [
-					offsetX + Math.cos(jitterAngle) * jitterRadius,
-					offsetZ + Math.sin(jitterAngle) * jitterRadius,
-				],
-				rotation: random2D(column, row, config.seed + 404) * Math.PI * 2,
-				scale: config.modelScale * (0.82 + random2D(column, row, config.seed + 505) * 0.36),
+				position: [offsetX + jx, offsetZ + jz],
+				rotation: (rotation(column * 0.3, row * 0.3) + 1) * Math.PI,
+				scale: config.modelScale * (0.82 + (scaleNoise(column * 0.4, row * 0.4) + 1) * 0.5 * 0.36),
 				wood: config.woodPerTree,
-				noise,
+				noise: finalDensity,
 				collected: false,
 			})
 		}
@@ -102,43 +107,39 @@ export function collectTree(tree: TreeResource) {
 	return tree
 }
 
-export function distanceMeters(from: PlanePoint, to: PlanePoint) {
+export function createRandomTree(
+	existingTrees: TreeResource[],
+	modelCount: number,
+	config: { radiusMeters: number; modelScale: number; woodPerTree: number; respawnMinSpacing: number },
+): TreeResource | null {
+	const maxRadius = config.radiusMeters * 0.8
+
+	for (let attempt = 0; attempt < 10; attempt++) {
+		const angle = Math.random() * Math.PI * 2
+		const dist = Math.random() * maxRadius
+		const position: PlanePoint = [Math.cos(angle) * dist, Math.sin(angle) * dist]
+
+		const tooClose = existingTrees.some(tree => {
+			if (tree.collected) return false
+			return distanceMeters(position, tree.position) < config.respawnMinSpacing
+		})
+		if (tooClose) continue
+
+		return {
+			id: `tree-rand-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+			modelIndex: Math.floor(Math.random() * modelCount),
+			position,
+			rotation: Math.random() * Math.PI * 2,
+			scale: config.modelScale * (0.82 + Math.random() * 0.36),
+			wood: config.woodPerTree,
+			noise: 0.5,
+			collected: false,
+		}
+	}
+
+	return null
+}
+
+function distanceMeters(from: PlanePoint, to: PlanePoint) {
 	return Math.hypot(to[0] - from[0], to[1] - from[1])
-}
-
-function fractalNoise(x: number, y: number, seed: number) {
-	let value = 0
-	let amplitudeTotal = 0
-
-	NOISE_OCTAVES.forEach(octave => {
-		value += valueNoise(x * octave.frequency, y * octave.frequency, seed) * octave.amplitude
-		amplitudeTotal += octave.amplitude
-	})
-
-	return value / amplitudeTotal
-}
-
-function valueNoise(x: number, y: number, seed: number) {
-	const x0 = Math.floor(x)
-	const y0 = Math.floor(y)
-	const x1 = x0 + 1
-	const y1 = y0 + 1
-	const sx = smoothstep(x - x0)
-	const sy = smoothstep(y - y0)
-	const top = lerp(random2D(x0, y0, seed), random2D(x1, y0, seed), sx)
-	const bottom = lerp(random2D(x0, y1, seed), random2D(x1, y1, seed), sx)
-	return lerp(top, bottom, sy)
-}
-
-function random2D(x: number, y: number, seed: number) {
-	const value = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453123
-	return value - Math.floor(value)
-}
-
-function smoothstep(value: number) {
-	return value * value * (3 - 2 * value)
-}
-
-function lerp(start: number, end: number, amount: number) {
-	return start + (end - start) * amount
 }
