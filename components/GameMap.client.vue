@@ -2,11 +2,6 @@
 	<div class="map-stage">
 		<div ref="maptalksContainer" class="maptalks-container"></div>
 		<div ref="mapboxContainer" class="mapbox-container"></div>
-		<div class="game-time">
-			<span>{{ gameDateLabel }}</span>
-			<strong>{{ gameTimeLabel }}</strong>
-			<small>行走 {{ playerTraveledMetersLabel }} 米</small>
-		</div>
 	</div>
 </template>
 
@@ -37,9 +32,9 @@ import {
 	WebGLRenderer,
 } from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 
-import { GAME_TIME_CONFIG, MAP_CONFIG, MAPBOX_CONFIG, PLAYER_CONFIG } from '../src/config'
+import { MAP_CONFIG, MAPBOX_CONFIG, PLAYER_CONFIG } from '../src/config'
 import { applyGameTimeEnvironment } from '../src/game/environment'
 import {
 	createPlayerAnimationController,
@@ -49,7 +44,6 @@ import {
 	createPlayerMovement,
 	type PlayerMovementState,
 } from '../src/game/player/movement'
-import { useGameTime } from '../src/game/time'
 
 defineOptions({
 	name: 'App',
@@ -63,13 +57,6 @@ let mapboxMap: MapboxMap | null = null
 let playerLayer: PlayerModelLayer | null = null
 let explorePulseFrame = 0
 let playerMovement: PlayerMovementState | null = null
-const gameTime = useGameTime(GAME_TIME_CONFIG)
-const gameDateLabel = gameTime.dateLabel
-const gameTimeLabel = gameTime.timeLabel
-const playerTraveledMeters = ref(0)
-const playerTraveledMetersLabel = computed(() =>
-	Math.floor(playerTraveledMeters.value).toLocaleString('zh-CN'),
-)
 
 class PlayerModelLayer implements CustomLayerInterface {
 	id = 'player-model'
@@ -156,7 +143,6 @@ class PlayerModelLayer implements CustomLayerInterface {
 
 		const delta = this.clock.getDelta()
 		this.movement.update(delta)
-		playerTraveledMeters.value = this.movement.traveledMeters
 		this.playerAnimationController?.update(delta)
 		this.updateModelMatrix(this.movement.bearing)
 		this.camera.projectionMatrix = new Matrix4().fromArray(matrix).multiply(this.modelMatrix)
@@ -365,11 +351,9 @@ function createCircleFeature(center: [number, number], radiusMeters: number) {
 onMounted(() => {
 	createMaptalksShell()
 	createMapboxScene()
-	gameTime.start()
 })
 
 onUnmounted(() => {
-	gameTime.stop()
 	if (explorePulseFrame) {
 		window.cancelAnimationFrame(explorePulseFrame)
 	}
@@ -411,48 +395,6 @@ onUnmounted(() => {
 	z-index: 1;
 }
 
-.game-time {
-	position: absolute;
-	z-index: 3;
-	top: 20px;
-	left: 20px;
-	display: grid;
-	gap: 6px;
-	min-width: 178px;
-	padding: 12px 14px;
-	color: #d9fbff;
-	background: rgb(3 16 28 / 72%);
-	border: 1px solid rgb(74 224 255 / 44%);
-	box-shadow: 0 0 24px rgb(34 220 255 / 18%), inset 0 0 18px rgb(34 220 255 / 10%);
-	backdrop-filter: blur(10px);
-}
-
-.game-time span {
-	font-size: 13px;
-	line-height: 1;
-	color: #80e5ef;
-	white-space: nowrap;
-}
-
-.game-time strong {
-	font-size: 28px;
-	line-height: 1;
-	font-variant-numeric: tabular-nums;
-}
-
-.game-time small {
-	font-size: 12px;
-	line-height: 1;
-	color: #b9f4fa;
-	white-space: nowrap;
-}
-
-@media (max-width: 640px) {
-	.game-time {
-		top: 12px;
-		left: 12px;
-	}
-}
 </style>
 
 <style lang="scss">
