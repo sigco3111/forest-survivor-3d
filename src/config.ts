@@ -4,7 +4,7 @@ export const PLAYER_CONFIG = {
   scale: 6,
   rotationY: 0,
   walkStepDistanceMeters: 220, // 探索距离：220 单位
-  walkSpeedMetersPerSecond: 18, // 基础速度：18 单位/秒
+  walkSpeedMetersPerSecond: 24, // 基础速度：24 单位/秒
   collectTreeRadiusMeters: 18, // 玩家与树的距离 ≤ 18 时触发砍树
   chopTreeDurationMs: 2800,
 };
@@ -56,7 +56,7 @@ export const DAY_CYCLE_CONFIG = {
 
 // 怪物看管植物配置
 export const MONSTER_GUARDIAN_CONFIG = {
-  guardianDetectionRadius: 180,  // 玩家砍树时怪物的警觉范围
+  guardianDetectionRadius: 135,  // 玩家砍树时怪物的警觉范围
   tendPlantRadius: 120,          // 怪物寻找种植点的搜索半径
   tendPlantDurationMs: 4000,     // 种植动作持续时间
   plantTreeRadius: 30,           // 怪物种出的树之间的最小间距
@@ -78,10 +78,10 @@ export const MONSTER_CONFIG = {
   modelScale: 6,
   scaleRange: [0.8, 1.2] as [number, number],
   patrolRadius: 80,
-  speed: 30,
+  speed: 22,
   detectionRadius: 120,
   attackRadius: 20,
-  activityRadius: 220,
+  activityRadius: 170,
   health: 100,
   attackDamage: 10,
   attackCooldownMs: 1500,
