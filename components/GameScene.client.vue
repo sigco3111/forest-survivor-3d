@@ -433,6 +433,15 @@ function createPlayer(targetScene: Scene) {
 		worldRadius: WORLD_RADIUS,
 		collisionCheck: pos => checkCollision(pos),
 		treeResources: () => treeResources,
+		threatSources: () => monsterAgents
+			.filter(agent => agent.state === 'chase' || agent.state === 'attack')
+			.map(agent => ({
+				position: agent.position,
+				homePosition: agent.resource.homePosition,
+				activityRadius: agent.resource.activityRadius,
+				speed: agent.resource.speed,
+				attackRadius: MONSTER_CONFIG.attackRadius,
+			})),
 	})
 
 	new GLTFLoader().load(
@@ -528,6 +537,7 @@ function updateMonsters(delta: number, now: number) {
 		playerPosition: playerAgent.position,
 		playerAlive: playerAgent.playerAlive,
 		playerIsChopping: playerAgent.state === 'chopping',
+		playerIsFleeing: playerAgent.state === 'fleeing',
 		onAttackPlayer: () => {
 			// 怪物攻击：偷走玩家的木头
 			if (!playerAgent) return

@@ -81,6 +81,7 @@ export const MONSTER_CONFIG = {
   speed: 30,
   detectionRadius: 120,
   attackRadius: 20,
+  activityRadius: 220,
   health: 100,
   attackDamage: 10,
   attackCooldownMs: 1500,

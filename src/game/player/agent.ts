@@ -5,7 +5,28 @@ import {
 	type TreeResource,
 } from '../resources/trees'
 
-export type PlayerAgentState = 'exploring' | 'approaching' | 'chopping'
+export type PlayerAgentState = 'exploring' | 'approaching' | 'chopping' | 'fleeing'
+
+export type PlayerThreatSource = {
+	position: PlanePoint
+	homePosition: PlanePoint
+	activityRadius: number
+	speed: number
+	attackRadius: number
+}
+
+type AvoidedArea = {
+	center: PlanePoint
+	radius: number
+	expiresAt: number
+}
+
+type FailedAreaAttempt = {
+	center: PlanePoint
+	radius: number
+	count: number
+	lastAttemptAt: number
+}
 
 export type PlayerAgentConfig = {
 	exploreDistance: number       // 探索/扫描树的半径
@@ -15,6 +36,7 @@ export type PlayerAgentConfig = {
 	worldRadius: number           // 世界半径
 	collisionCheck: (position: PlanePoint) => boolean
 	treeResources: () => TreeResource[]
+	threatSources: () => PlayerThreatSource[]
 }
 
 export type PlayerAgent = {
@@ -28,9 +50,16 @@ export type PlayerAgent = {
 	animation: 'walk' | 'interact' | null
 	lastCollectedTree: TreeResource | null
 	playerAlive: boolean
+	avoidedAreas: AvoidedArea[]
+	failedAreaAttempt: FailedAreaAttempt | null
 
 	update(delta: number, now: number): void
 }
+
+const AREA_FAILURE_LIMIT = 2
+const AREA_FAILURE_MEMORY_MS = 22_000
+const AREA_AVOID_DURATION_MS = 45_000
+const AREA_AVOID_PADDING = 45
 
 export function createPlayerAgent(
 	startPosition: PlanePoint,
@@ -47,9 +76,18 @@ export function createPlayerAgent(
 		animation: 'walk',
 		lastCollectedTree: null,
 		playerAlive: true,
+		avoidedAreas: [],
+		failedAreaAttempt: null,
 
 		update(delta, now) {
 			if (!this.playerAlive) return
+			pruneAvoidedAreas(this, now)
+
+			const threat = findActiveThreat(this.position, config)
+			if (threat && shouldFleeThreat(this, now, threat, config)) {
+				registerFailedAreaAttempt(this, threat, now)
+				startFleeing(this, threat, config, now)
+			}
 
 			switch (this.state) {
 				case 'exploring':
@@ -60,6 +98,9 @@ export function createPlayerAgent(
 					break
 				case 'chopping':
 					updateChopping(this, now, config)
+					break
+				case 'fleeing':
+					updateFleeing(this, delta, config)
 					break
 			}
 		},
@@ -73,12 +114,12 @@ function updateExploring(agent: PlayerAgent, delta: number, config: PlayerAgentC
 	moveToward(agent, delta, config)
 
 	if (distanceTo(agent.position, agent.target) < 2) {
-		agent.target = pickExplorationTarget(agent.position, config)
+		agent.target = pickExplorationTarget(agent.position, config, agent.avoidedAreas)
 	}
 
 	// 每隔一小段距离扫描附近是否有树
 	const nearbyTree = findNearbyTree(
-		config.treeResources(),
+		availableTrees(agent, config),
 		agent.position,
 		config.exploreDistance,
 	)
@@ -96,7 +137,7 @@ function updateApproaching(agent: PlayerAgent, delta: number, config: PlayerAgen
 	if (!agent.activeTree || agent.activeTree.collected) {
 		agent.activeTree = null
 		agent.state = 'exploring'
-		agent.target = pickExplorationTarget(agent.position, config)
+		agent.target = pickExplorationTarget(agent.position, config, agent.avoidedAreas)
 		agent.animation = 'walk'
 		return
 	}
@@ -118,7 +159,7 @@ function updateApproaching(agent: PlayerAgent, delta: number, config: PlayerAgen
 function updateChopping(agent: PlayerAgent, now: number, config: PlayerAgentConfig) {
 	if (!agent.activeTree) {
 		agent.state = 'exploring'
-		agent.target = pickExplorationTarget(agent.position, config)
+		agent.target = pickExplorationTarget(agent.position, config, agent.avoidedAreas)
 		agent.animation = 'walk'
 		return
 	}
@@ -133,11 +174,32 @@ function updateChopping(agent: PlayerAgent, now: number, config: PlayerAgentConf
 		const tree = collectTree(agent.activeTree)
 		agent.woodCollected += tree.wood
 		agent.lastCollectedTree = tree
+		agent.failedAreaAttempt = null
 		agent.activeTree = null
 		agent.choppingProgress = 0
 		agent.state = 'exploring'
-		agent.target = pickExplorationTarget(agent.position, config)
+		agent.target = pickExplorationTarget(agent.position, config, agent.avoidedAreas)
 		agent.animation = 'walk'
+	}
+}
+
+// ===== 逃跑：看到怪物追击/攻击时停止砍树，跑出怪物活动半径 =====
+function updateFleeing(agent: PlayerAgent, delta: number, config: PlayerAgentConfig) {
+	const threat = findActiveThreat(agent.position, config)
+
+	if (threat && distanceTo(agent.target, threat.homePosition) <= threat.activityRadius) {
+		agent.target = pickFleeTarget(agent.position, threat, config)
+	}
+
+	moveToward(agent, delta, config)
+	agent.bearing = faceTarget(agent, agent.target)
+	agent.animation = 'walk'
+
+	if (!threat && distanceTo(agent.position, agent.target) < 3) {
+		agent.state = 'exploring'
+		agent.activeTree = null
+		agent.choppingProgress = 0
+		agent.target = pickExplorationTarget(agent.position, config, agent.avoidedAreas)
 	}
 }
 
@@ -158,7 +220,7 @@ function moveToward(agent: PlayerAgent, delta: number, config: PlayerAgentConfig
 	]
 
 	if (config.collisionCheck(newPosition)) {
-		agent.target = pickExplorationTarget(agent.position, config)
+		agent.target = pickExplorationTarget(agent.position, config, agent.avoidedAreas)
 		return
 	}
 
@@ -170,7 +232,11 @@ function faceTarget(agent: PlayerAgent, target: PlanePoint): number {
 }
 
 // ===== 目标选择 =====
-function pickExplorationTarget(position: PlanePoint, config: PlayerAgentConfig): PlanePoint {
+function pickExplorationTarget(
+	position: PlanePoint,
+	config: PlayerAgentConfig,
+	avoidedAreas: AvoidedArea[] = [],
+): PlanePoint {
 	for (let attempt = 0; attempt < 10; attempt++) {
 		const minDistance = config.exploreDistance * 0.55
 		const distance = minDistance + Math.random() * (config.exploreDistance - minDistance)
@@ -188,10 +254,149 @@ function pickExplorationTarget(position: PlanePoint, config: PlayerAgentConfig):
 			]
 		}
 
-		if (!config.collisionCheck(next)) return next
+		if (!config.collisionCheck(next) && !isInsideAvoidedArea(next, avoidedAreas)) return next
 	}
 
 	return [position[0], position[1]]
+}
+
+function startFleeing(
+	agent: PlayerAgent,
+	threat: PlayerThreatSource,
+	config: PlayerAgentConfig,
+	now: number,
+) {
+	agent.state = 'fleeing'
+	agent.activeTree = null
+	agent.choppingProgress = 0
+	agent.animation = 'walk'
+	pruneAvoidedAreas(agent, now)
+	agent.target = pickFleeTarget(agent.position, threat, config)
+	agent.bearing = faceTarget(agent, agent.target)
+}
+
+function registerFailedAreaAttempt(agent: PlayerAgent, threat: PlayerThreatSource, now: number) {
+	const radius = threat.activityRadius + AREA_AVOID_PADDING
+	const previous = agent.failedAreaAttempt
+	const isSameArea = previous
+		&& distanceTo(previous.center, threat.homePosition) <= Math.max(previous.radius, radius)
+		&& now - previous.lastAttemptAt <= AREA_FAILURE_MEMORY_MS
+
+	const count = isSameArea ? previous.count + 1 : 1
+	agent.failedAreaAttempt = {
+		center: [...threat.homePosition],
+		radius,
+		count,
+		lastAttemptAt: now,
+	}
+
+	if (count < AREA_FAILURE_LIMIT) return
+
+	agent.avoidedAreas.push({
+		center: [...threat.homePosition],
+		radius,
+		expiresAt: now + AREA_AVOID_DURATION_MS,
+	})
+	agent.failedAreaAttempt = null
+}
+
+function pruneAvoidedAreas(agent: PlayerAgent, now: number) {
+	if (!agent.avoidedAreas.length) return
+	agent.avoidedAreas = agent.avoidedAreas.filter(area => area.expiresAt > now)
+}
+
+function availableTrees(agent: PlayerAgent, config: PlayerAgentConfig): TreeResource[] {
+	if (!agent.avoidedAreas.length) return config.treeResources()
+	return config.treeResources().filter(tree => !isInsideAvoidedArea(tree.position, agent.avoidedAreas))
+}
+
+function isInsideAvoidedArea(position: PlanePoint, avoidedAreas: AvoidedArea[]): boolean {
+	return avoidedAreas.some(area => distanceTo(position, area.center) <= area.radius)
+}
+
+function shouldFleeThreat(
+	agent: PlayerAgent,
+	now: number,
+	threat: PlayerThreatSource,
+	config: PlayerAgentConfig,
+): boolean {
+	if (agent.state === 'fleeing') return false
+	if (agent.state !== 'chopping') return true
+
+	const remainingChopMs = Math.max(0, config.chopDurationMs - (now - lastTreeScan))
+	const distanceBeforeHit = Math.max(0, distanceTo(agent.position, threat.position) - threat.attackRadius)
+	const timeUntilHitMs = (distanceBeforeHit / Math.max(threat.speed, 1)) * 1000
+	const fleeTarget = pickFleeTarget(agent.position, threat, config)
+	const timeToEscapeMs = (distanceTo(agent.position, fleeTarget) / Math.max(config.speed, 1)) * 1000
+
+	return remainingChopMs + timeToEscapeMs > timeUntilHitMs
+}
+
+function findActiveThreat(position: PlanePoint, config: PlayerAgentConfig): PlayerThreatSource | null {
+	let nearestThreat: PlayerThreatSource | null = null
+	let nearestDistance = Number.POSITIVE_INFINITY
+
+	for (const threat of config.threatSources()) {
+		const distanceFromHome = distanceTo(position, threat.homePosition)
+		if (distanceFromHome > threat.activityRadius) continue
+
+		const distanceFromThreat = distanceTo(position, threat.position)
+		if (distanceFromThreat < nearestDistance) {
+			nearestThreat = threat
+			nearestDistance = distanceFromThreat
+		}
+	}
+
+	return nearestThreat
+}
+
+function pickFleeTarget(
+	position: PlanePoint,
+	threat: PlayerThreatSource,
+	config: PlayerAgentConfig,
+): PlanePoint {
+	const buffer = Math.max(config.collectRadius * 2, 36)
+	const dx = position[0] - threat.homePosition[0]
+	const dz = position[1] - threat.homePosition[1]
+	const distanceFromHome = Math.max(Math.hypot(dx, dz), 1)
+	const baseAngle = Math.atan2(dx, dz)
+	const targetDistance = threat.activityRadius + buffer
+
+	for (let attempt = 0; attempt < 16; attempt++) {
+		const direction = attempt % 2 === 0 ? 1 : -1
+		const spread = Math.ceil(attempt / 2) * (Math.PI / 8)
+		const angle = baseAngle + direction * spread
+		const target = clampToWorld([
+			threat.homePosition[0] + Math.sin(angle) * targetDistance,
+			threat.homePosition[1] + Math.cos(angle) * targetDistance,
+		], config)
+
+		if (
+			distanceTo(target, threat.homePosition) > threat.activityRadius + config.collectRadius
+			&& !config.collisionCheck(target)
+		) {
+			return target
+		}
+	}
+
+	const fallback = clampToWorld([
+		position[0] + (dx / distanceFromHome) * buffer,
+		position[1] + (dz / distanceFromHome) * buffer,
+	], config)
+	if (distanceTo(fallback, threat.homePosition) > threat.activityRadius) return fallback
+
+	return pickExplorationTarget(position, config, [])
+}
+
+function clampToWorld(point: PlanePoint, config: PlayerAgentConfig): PlanePoint {
+	const distanceFromCenter = Math.hypot(point[0], point[1])
+	const maxDistance = config.worldRadius * 0.82
+	if (distanceFromCenter <= maxDistance) return point
+
+	return [
+		point[0] * (maxDistance / distanceFromCenter),
+		point[1] * (maxDistance / distanceFromCenter),
+	]
 }
 
 function distanceTo(from: PlanePoint, to: PlanePoint): number {

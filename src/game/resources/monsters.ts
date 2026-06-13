@@ -16,6 +16,7 @@ export type MonsterResource = {
 	maxHealth: number
 	attackDamage: number
 	attackCooldownMs: number
+	activityRadius: number
 }
 
 export type MonsterAgentState = 'idle' | 'patrol' | 'tendPlants' | 'chase' | 'attack' | 'death'
@@ -24,6 +25,7 @@ export type MonsterUpdateContext = {
 	playerPosition: PlanePoint
 	playerAlive: boolean
 	playerIsChopping: boolean
+	playerIsFleeing: boolean
 	onAttackPlayer: () => void
 }
 
@@ -56,6 +58,7 @@ type MonsterConfig = {
 	health: number
 	attackDamage: number
 	attackCooldownMs: number
+	activityRadius: number
 	modelScale: number
 }
 
@@ -96,6 +99,7 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 			maxHealth: config.health,
 			attackDamage: config.attackDamage,
 			attackCooldownMs: config.attackCooldownMs,
+			activityRadius: config.activityRadius * (0.85 + rand() * 0.3),
 		})
 	}
 
@@ -132,13 +136,17 @@ export function createMonsterAgent(
 				context.playerPosition[0] - this.position[0],
 				context.playerPosition[1] - this.position[1],
 			)
+			const playerDistanceFromHome = Math.hypot(
+				context.playerPosition[0] - this.resource.homePosition[0],
+				context.playerPosition[1] - this.resource.homePosition[1],
+			)
 
 			switch (this.state) {
 				case 'idle':
-					updateIdle(this, delta, distToPlayer, context)
+					updateIdle(this, delta, distToPlayer, playerDistanceFromHome, context)
 					break
 				case 'patrol':
-					updatePatrol(this, delta, distToPlayer, context)
+					updatePatrol(this, delta, distToPlayer, playerDistanceFromHome, context)
 					break
 				case 'tendPlants':
 					updateTendPlants(this, delta, now)
@@ -159,10 +167,11 @@ function updateIdle(
 	agent: MonsterAgent,
 	delta: number,
 	distToPlayer: number,
+	playerDistanceFromHome: number,
 	context: MonsterUpdateContext,
 ) {
 	// 只有玩家在砍树且在警觉范围内才追击
-	if (context.playerAlive && context.playerIsChopping && distToPlayer < MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius) {
+	if (canChasePlayer(agent, distToPlayer, playerDistanceFromHome, context)) {
 		agent.state = 'chase'
 		agent.animation = 'run'
 		return
@@ -190,10 +199,11 @@ function updatePatrol(
 	agent: MonsterAgent,
 	delta: number,
 	distToPlayer: number,
+	playerDistanceFromHome: number,
 	context: MonsterUpdateContext,
 ) {
 	// 只有玩家在砍树且在警觉范围内才追击
-	if (context.playerAlive && context.playerIsChopping && distToPlayer < MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius) {
+	if (canChasePlayer(agent, distToPlayer, playerDistanceFromHome, context)) {
 		agent.state = 'chase'
 		agent.animation = 'run'
 		return
@@ -254,8 +264,8 @@ function updateChase(
 	distToPlayer: number,
 	context: MonsterUpdateContext,
 ) {
-	// 玩家停止砍树 → 失去兴趣
-	if (!context.playerIsChopping || !context.playerAlive) {
+	// 玩家停止砍树且没有逃跑 → 失去兴趣
+	if ((!context.playerIsChopping && !context.playerIsFleeing) || !context.playerAlive) {
 		agent.state = 'idle'
 		agent.animation = 'idle'
 		agent.stateTimer = 0
@@ -263,10 +273,15 @@ function updateChase(
 	}
 
 	// 玩家超出警觉范围 → 放弃追击
-	if (distToPlayer > MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius * 1.5) {
+	if (
+		distToPlayer > MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius * 1.5
+		|| distanceTo(agent.position, agent.resource.homePosition) > agent.resource.activityRadius
+		|| distanceTo(context.playerPosition, agent.resource.homePosition) > agent.resource.activityRadius
+	) {
 		agent.state = 'idle'
 		agent.animation = 'idle'
 		agent.stateTimer = 0
+		agent.target = pickPatrolTarget(agent)
 		return
 	}
 
@@ -291,8 +306,8 @@ function updateAttack(
 ) {
 	agent.bearing = faceTarget(agent, context.playerPosition)
 
-	// 玩家停止砍树 → 放弃攻击
-	if (!context.playerIsChopping || !context.playerAlive) {
+	// 玩家停止砍树且没有逃跑 → 放弃攻击
+	if ((!context.playerIsChopping && !context.playerIsFleeing) || !context.playerAlive) {
 		agent.state = 'idle'
 		agent.animation = 'idle'
 		agent.stateTimer = 0
@@ -301,6 +316,16 @@ function updateAttack(
 
 	// 玩家超出攻击范围 → 继续追击
 	if (distToPlayer > 30) {
+		if (
+			distanceTo(agent.position, agent.resource.homePosition) > agent.resource.activityRadius
+			|| distanceTo(context.playerPosition, agent.resource.homePosition) > agent.resource.activityRadius
+		) {
+			agent.state = 'idle'
+			agent.animation = 'idle'
+			agent.stateTimer = 0
+			agent.target = pickPatrolTarget(agent)
+			return
+		}
 		agent.state = 'chase'
 		agent.animation = 'run'
 		return
@@ -314,6 +339,18 @@ function updateAttack(
 }
 
 // ===== 辅助函数 =====
+
+function canChasePlayer(
+	agent: MonsterAgent,
+	distToPlayer: number,
+	playerDistanceFromHome: number,
+	context: MonsterUpdateContext,
+): boolean {
+	return context.playerAlive
+		&& context.playerIsChopping
+		&& distToPlayer < MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius
+		&& playerDistanceFromHome <= agent.resource.activityRadius
+}
 
 function moveToward(agent: MonsterAgent, delta: number) {
 	const dx = agent.target[0] - agent.position[0]
