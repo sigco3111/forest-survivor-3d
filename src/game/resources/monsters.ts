@@ -1,3 +1,4 @@
+import { MONSTER_GUARDIAN_CONFIG } from '../../config'
 import type { PlanePoint } from '../resources/trees'
 
 export type MonsterResource = {
@@ -17,7 +18,14 @@ export type MonsterResource = {
 	attackCooldownMs: number
 }
 
-export type MonsterAgentState = 'idle' | 'patrol' | 'chase' | 'attack' | 'death'
+export type MonsterAgentState = 'idle' | 'patrol' | 'tendPlants' | 'chase' | 'attack' | 'death'
+
+export type MonsterUpdateContext = {
+	playerPosition: PlanePoint
+	playerAlive: boolean
+	playerIsChopping: boolean
+	onAttackPlayer: () => void
+}
 
 export type MonsterAgent = {
 	resource: MonsterResource
@@ -28,8 +36,11 @@ export type MonsterAgent = {
 	animation: string
 	lastAttackTime: number
 	stateTimer: number
+	tendTarget: PlanePoint | null
+	tendTimer: number
+	plantCallback: ((position: PlanePoint) => void) | null
 
-	update(delta: number, now: number, playerPosition: PlanePoint, playerAlive: boolean): void
+	update(delta: number, now: number, context: MonsterUpdateContext): void
 }
 
 type MonsterConfig = {
@@ -91,7 +102,10 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 	return monsters
 }
 
-export function createMonsterAgent(resource: MonsterResource): MonsterAgent {
+export function createMonsterAgent(
+	resource: MonsterResource,
+	plantCallback?: (position: PlanePoint) => void,
+): MonsterAgent {
 	return {
 		resource,
 		state: 'idle',
@@ -101,8 +115,11 @@ export function createMonsterAgent(resource: MonsterResource): MonsterAgent {
 		animation: 'idle',
 		lastAttackTime: 0,
 		stateTimer: 0,
+		tendTarget: null,
+		tendTimer: 0,
+		plantCallback: plantCallback ?? null,
 
-		update(delta, now, playerPosition, playerAlive) {
+		update(delta, now, context) {
 			if (this.resource.health <= 0) {
 				if (this.state !== 'death') {
 					this.state = 'death'
@@ -112,30 +129,40 @@ export function createMonsterAgent(resource: MonsterResource): MonsterAgent {
 			}
 
 			const distToPlayer = Math.hypot(
-				playerPosition[0] - this.position[0],
-				playerPosition[1] - this.position[1],
+				context.playerPosition[0] - this.position[0],
+				context.playerPosition[1] - this.position[1],
 			)
 
 			switch (this.state) {
 				case 'idle':
-					updateIdle(this, delta, distToPlayer, playerAlive)
+					updateIdle(this, delta, distToPlayer, context)
 					break
 				case 'patrol':
-					updatePatrol(this, delta, distToPlayer, playerAlive)
+					updatePatrol(this, delta, distToPlayer, context)
+					break
+				case 'tendPlants':
+					updateTendPlants(this, delta, now)
 					break
 				case 'chase':
-					updateChase(this, delta, now, distToPlayer, playerPosition, playerAlive)
+					updateChase(this, delta, now, distToPlayer, context)
 					break
 				case 'attack':
-					updateAttack(this, delta, now, distToPlayer, playerPosition, playerAlive)
+					updateAttack(this, delta, now, distToPlayer, context)
 					break
 			}
 		},
 	}
 }
 
-function updateIdle(agent: MonsterAgent, delta: number, distToPlayer: number, playerAlive: boolean) {
-	if (playerAlive && distToPlayer < agent.resource.detectionRadius) {
+// ===== idle：等待 3 秒后巡逻或种植 =====
+function updateIdle(
+	agent: MonsterAgent,
+	delta: number,
+	distToPlayer: number,
+	context: MonsterUpdateContext,
+) {
+	// 只有玩家在砍树且在警觉范围内才追击
+	if (context.playerAlive && context.playerIsChopping && distToPlayer < MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius) {
 		agent.state = 'chase'
 		agent.animation = 'run'
 		return
@@ -144,14 +171,29 @@ function updateIdle(agent: MonsterAgent, delta: number, distToPlayer: number, pl
 	agent.stateTimer += delta
 	if (agent.stateTimer > 3) {
 		agent.stateTimer = 0
-		agent.state = 'patrol'
-		agent.animation = 'walk'
-		agent.target = pickPatrolTarget(agent)
+		// 40% 概率去种植
+		if (Math.random() < 0.4 && agent.plantCallback) {
+			agent.state = 'tendPlants'
+			agent.tendTarget = pickTendTarget(agent)
+			agent.tendTimer = 0
+			agent.animation = 'walk'
+		} else {
+			agent.state = 'patrol'
+			agent.animation = 'walk'
+			agent.target = pickPatrolTarget(agent)
+		}
 	}
 }
 
-function updatePatrol(agent: MonsterAgent, delta: number, distToPlayer: number, playerAlive: boolean) {
-	if (playerAlive && distToPlayer < agent.resource.detectionRadius) {
+// ===== patrol：巡逻，砍树时警觉 =====
+function updatePatrol(
+	agent: MonsterAgent,
+	delta: number,
+	distToPlayer: number,
+	context: MonsterUpdateContext,
+) {
+	// 只有玩家在砍树且在警觉范围内才追击
+	if (context.playerAlive && context.playerIsChopping && distToPlayer < MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius) {
 		agent.state = 'chase'
 		agent.animation = 'run'
 		return
@@ -166,17 +208,71 @@ function updatePatrol(agent: MonsterAgent, delta: number, distToPlayer: number, 
 	}
 }
 
-function updateChase(agent: MonsterAgent, delta: number, now: number, distToPlayer: number, playerPosition: PlanePoint, playerAlive: boolean) {
-	if (!playerAlive || distToPlayer > agent.resource.detectionRadius * 1.5) {
+// ===== tendPlants：种植植物 =====
+function updateTendPlants(agent: MonsterAgent, delta: number, _now: number) {
+	if (!agent.tendTarget) {
 		agent.state = 'idle'
 		agent.animation = 'idle'
 		agent.stateTimer = 0
 		return
 	}
 
-	agent.target = [...playerPosition]
+	// 还没到种植点，继续走
+	const distToTarget = distanceTo(agent.position, agent.tendTarget)
+	if (distToTarget > 3) {
+		agent.target = [...agent.tendTarget]
+		moveToward(agent, delta)
+		agent.bearing = Math.atan2(
+			agent.tendTarget[0] - agent.position[0],
+			agent.tendTarget[1] - agent.position[1],
+		)
+		return
+	}
+
+	// 到达种植点，开始种植
+	agent.animation = 'tend'
+	agent.tendTimer += delta * 1000 // 转换为毫秒
+
+	if (agent.tendTimer >= MONSTER_GUARDIAN_CONFIG.tendPlantDurationMs) {
+		// 种植完成
+		if (agent.plantCallback) {
+			agent.plantCallback(agent.tendTarget)
+		}
+		agent.tendTarget = null
+		agent.tendTimer = 0
+		agent.state = 'idle'
+		agent.animation = 'idle'
+		agent.stateTimer = 0
+	}
+}
+
+// ===== chase：追击砍树的玩家 =====
+function updateChase(
+	agent: MonsterAgent,
+	delta: number,
+	now: number,
+	distToPlayer: number,
+	context: MonsterUpdateContext,
+) {
+	// 玩家停止砍树 → 失去兴趣
+	if (!context.playerIsChopping || !context.playerAlive) {
+		agent.state = 'idle'
+		agent.animation = 'idle'
+		agent.stateTimer = 0
+		return
+	}
+
+	// 玩家超出警觉范围 → 放弃追击
+	if (distToPlayer > MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius * 1.5) {
+		agent.state = 'idle'
+		agent.animation = 'idle'
+		agent.stateTimer = 0
+		return
+	}
+
+	agent.target = [...context.playerPosition]
 	moveToward(agent, delta)
-	agent.bearing = faceTarget(agent, playerPosition)
+	agent.bearing = faceTarget(agent, context.playerPosition)
 
 	if (distToPlayer < 20) {
 		agent.state = 'attack'
@@ -185,16 +281,36 @@ function updateChase(agent: MonsterAgent, delta: number, now: number, distToPlay
 	}
 }
 
-function updateAttack(agent: MonsterAgent, delta: number, now: number, distToPlayer: number, playerPosition: PlanePoint, playerAlive: boolean) {
-	agent.bearing = faceTarget(agent, playerPosition)
+// ===== attack：攻击玩家（偷走木头） =====
+function updateAttack(
+	agent: MonsterAgent,
+	delta: number,
+	now: number,
+	distToPlayer: number,
+	context: MonsterUpdateContext,
+) {
+	agent.bearing = faceTarget(agent, context.playerPosition)
 
-	if (!playerAlive || distToPlayer > 30) {
-		agent.state = playerAlive ? 'chase' : 'idle'
-		agent.animation = playerAlive ? 'run' : 'idle'
+	// 玩家停止砍树 → 放弃攻击
+	if (!context.playerIsChopping || !context.playerAlive) {
+		agent.state = 'idle'
+		agent.animation = 'idle'
+		agent.stateTimer = 0
 		return
 	}
 
-	// 攻击由外部通过 lastAttackTime 和 attackCooldownMs 控制
+	// 玩家超出攻击范围 → 继续追击
+	if (distToPlayer > 30) {
+		agent.state = 'chase'
+		agent.animation = 'run'
+		return
+	}
+
+	// 攻击冷却到期 → 命中
+	if (now - agent.lastAttackTime >= agent.resource.attackCooldownMs) {
+		context.onAttackPlayer()
+		agent.lastAttackTime = now
+	}
 }
 
 // ===== 辅助函数 =====
@@ -223,6 +339,15 @@ function faceTarget(agent: MonsterAgent, target: PlanePoint): number {
 function pickPatrolTarget(agent: MonsterAgent): PlanePoint {
 	const angle = Math.random() * Math.PI * 2
 	const dist = Math.random() * agent.resource.patrolRadius
+	return [
+		agent.resource.homePosition[0] + Math.cos(angle) * dist,
+		agent.resource.homePosition[1] + Math.sin(angle) * dist,
+	]
+}
+
+function pickTendTarget(agent: MonsterAgent): PlanePoint {
+	const angle = Math.random() * Math.PI * 2
+	const dist = Math.random() * MONSTER_GUARDIAN_CONFIG.tendPlantRadius
 	return [
 		agent.resource.homePosition[0] + Math.cos(angle) * dist,
 		agent.resource.homePosition[1] + Math.sin(angle) * dist,

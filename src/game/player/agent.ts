@@ -27,6 +27,7 @@ export type PlayerAgent = {
 	woodCollected: number
 	animation: 'walk' | 'interact' | null
 	lastCollectedTree: TreeResource | null
+	playerAlive: boolean
 
 	update(delta: number, now: number): void
 }
@@ -45,8 +46,11 @@ export function createPlayerAgent(
 		woodCollected: 0,
 		animation: 'walk',
 		lastCollectedTree: null,
+		playerAlive: true,
 
 		update(delta, now) {
+			if (!this.playerAlive) return
+
 			switch (this.state) {
 				case 'exploring':
 					updateExploring(this, delta, config)

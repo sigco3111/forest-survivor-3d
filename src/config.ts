@@ -48,7 +48,21 @@ export const ENVIRONMENT_CONFIG = {
   collisionRadius: 6,
 };
 
-// 怪物配置：巡逻+追击 AI
+// 昼夜循环：1 分钟 = 游戏内 1 天
+export const DAY_CYCLE_CONFIG = {
+  realMsPerDay: 60_000,        // 1 分钟 = 1 游戏天
+  woodConsumedPerDay: 5,       // 每天消耗 5 木头
+}
+
+// 怪物看管植物配置
+export const MONSTER_GUARDIAN_CONFIG = {
+  guardianDetectionRadius: 180,  // 玩家砍树时怪物的警觉范围
+  tendPlantRadius: 120,          // 怪物寻找种植点的搜索半径
+  tendPlantDurationMs: 4000,     // 种植动作持续时间
+  plantTreeRadius: 30,           // 怪物种出的树之间的最小间距
+}
+
+// 怪物配置：看管植物 AI
 export const MONSTER_CONFIG = {
   modelUrls: [
     "/models/monster/1.glb",

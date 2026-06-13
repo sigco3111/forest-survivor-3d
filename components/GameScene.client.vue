@@ -2,9 +2,12 @@
 	<div class="game-stage">
 		<div ref="sceneContainer" class="scene-container"></div>
 		<div class="resource-panel">
+			<div class="resource-panel__day">第 {{ currentDay }} 天</div>
 			<div class="resource-panel__label">木材</div>
 			<div class="resource-panel__value">{{ woodCount }}</div>
+			<div class="resource-panel__consumption">每日消耗 -{{ woodPerDay }} 木材</div>
 			<div class="resource-panel__hint">{{ choppingHint }}</div>
+			<div v-if="lowWoodWarning" class="resource-panel__warning">⚠ 木材不足！</div>
 			<div v-if="choppingProgress > 0" class="resource-panel__progress">
 				<div
 					class="resource-panel__progress-bar"
@@ -18,6 +21,14 @@
 		<button class="minimap-toggle" @click="toggleCameraMode" :title="cameraMode === 'follow' ? '切换自由视角' : '切换跟随视角'">
 			{{ cameraMode === 'follow' ? '🔒' : '🔓' }}
 		</button>
+		<div v-if="gameOver" class="game-over-overlay">
+			<div class="game-over-content">
+				<h2>游戏结束</h2>
+				<p>你存活了 {{ currentDay - 1 }} 天</p>
+				<p>木材耗尽，你在寒夜中倒下</p>
+				<button class="game-over-btn" @click="restartGame">重新开始</button>
+			</div>
+		</div>
 	</div>
 </template>
 
@@ -50,8 +61,10 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import {
 	DEAD_TREE_CONFIG,
+	DAY_CYCLE_CONFIG,
 	ENVIRONMENT_CONFIG,
 	MONSTER_CONFIG,
+	MONSTER_GUARDIAN_CONFIG,
 	PLAYER_CONFIG,
 	TREE_RESOURCE_CONFIG,
 } from '../src/config'
@@ -82,7 +95,16 @@ import {
 	createMonsterResources,
 	type MonsterAgent,
 	type MonsterResource,
+	type MonsterUpdateContext,
 } from '../src/game/resources/monsters'
+import {
+	createDayCycle,
+	type DayCycleState,
+} from '../src/game/time/day-cycle'
+import {
+	createLightingController,
+	type LightingController,
+} from '../src/game/time/lighting'
 
 defineOptions({
 	name: 'GameScene',
@@ -92,8 +114,14 @@ const sceneContainer = ref<HTMLDivElement | null>(null)
 const minimapCanvas = ref<HTMLCanvasElement | null>(null)
 const choppingProgress = ref(0)
 const woodCount = ref(0)
+const currentDay = ref(1)
+const playerAlive = ref(true)
+const gameOver = ref(false)
+const lowWoodWarning = ref(false)
+const woodPerDay = DAY_CYCLE_CONFIG.woodConsumedPerDay
 const cameraMode = ref<'follow' | 'free'>('follow')
 const choppingHint = computed(() => {
+	if (gameOver.value) return '游戏结束'
 	if (choppingProgress.value > 0) {
 		return `伐木中 ${Math.round(choppingProgress.value * 100)}%`
 	}
@@ -122,6 +150,14 @@ let monsterResources: MonsterResource[] = []
 const monsterAgents: MonsterAgent[] = []
 const monsterObjects = new Map<string, Object3D>()
 const monsterAnimations = new Map<string, MonsterAnimationController>()
+
+// 昼夜循环和光照
+let dayCycle: ReturnType<typeof createDayCycle> | null = null
+let lightingController: LightingController | null = null
+let hemisphereLight: HemisphereLight | null = null
+let ambientLight: AmbientLight | null = null
+let keyLight: DirectionalLight | null = null
+let rimLight: DirectionalLight | null = null
 
 const WORLD_RADIUS = TREE_RESOURCE_CONFIG.radiusMeters
 const PLAYER_START: PlanePoint = [0, 0]
@@ -171,6 +207,9 @@ function createScene() {
 		minimapCanvas.value.height = MINIMAP_SIZE * dpr
 	}
 
+	// 初始化昼夜循环
+	dayCycle = createDayCycle(DAY_CYCLE_CONFIG)
+
 	addEnvironment(scene)
 	createTrees(scene)
 	createEnvObjects(scene)
@@ -185,9 +224,9 @@ function addEnvironment(targetScene: Scene) {
 		targetScene.background = texture
 	})
 
-	const hemisphereLight = new HemisphereLight('#c9fbff', '#193023', 1.9)
-	const ambientLight = new AmbientLight('#ffffff', 0.55)
-	const keyLight = new DirectionalLight('#fff4dc', 4.6)
+	hemisphereLight = new HemisphereLight('#c9fbff', '#193023', 1.9)
+	ambientLight = new AmbientLight('#ffffff', 0.55)
+	keyLight = new DirectionalLight('#fff4dc', 4.6)
 	keyLight.position.set(-280, 520, 260)
 	keyLight.castShadow = true
 	keyLight.shadow.mapSize.set(2048, 2048)
@@ -197,10 +236,18 @@ function addEnvironment(targetScene: Scene) {
 	keyLight.shadow.camera.right = 900
 	keyLight.shadow.camera.top = 900
 	keyLight.shadow.camera.bottom = -900
-	const rimLight = new DirectionalLight('#35f4ff', 1.1)
+	rimLight = new DirectionalLight('#35f4ff', 1.1)
 	rimLight.position.set(320, 280, -420)
 
 	targetScene.add(hemisphereLight, ambientLight, keyLight, keyLight.target, rimLight)
+
+	// 创建光照控制器
+	lightingController = createLightingController({
+		hemisphere: hemisphereLight,
+		ambient: ambientLight,
+		key: keyLight,
+		rim: rimLight,
+	})
 
 	const ground = new Mesh(
 		new PlaneGeometry(WORLD_RADIUS * 2.6, WORLD_RADIUS * 2.6, 1, 1),
@@ -322,12 +369,54 @@ function createMonsters(targetScene: Scene) {
 				wrapper.position.set(m.position[0], 0, m.position[1])
 				targetScene.add(wrapper)
 				monsterObjects.set(m.id, wrapper)
-				monsterAgents.push(createMonsterAgent(m))
+
+				// 创建动画控制器（修复之前的 bug：动画未注册）
+				const animController = createMonsterAnimationController(model, gltf.animations)
+				monsterAnimations.set(m.id, animController)
+
+				// 创建怪物 AI，传入种植回调
+				monsterAgents.push(createMonsterAgent(m, (position) => {
+					plantTreeAtPosition(position)
+				}))
 			},
 			undefined,
 			error => console.error(`怪物模型加载失败：${modelUrl}`, error),
 		)
 	})
+}
+
+// 怪物种植回调：在指定位置创建新树
+function plantTreeAtPosition(position: PlanePoint) {
+	const newTree = createRandomTree(
+		treeResources,
+		TREE_RESOURCE_CONFIG.modelUrls.length,
+		{
+			radiusMeters: TREE_RESOURCE_CONFIG.radiusMeters,
+			modelScale: TREE_RESOURCE_CONFIG.modelScale,
+			woodPerTree: TREE_RESOURCE_CONFIG.woodPerTree,
+			respawnMinSpacing: MONSTER_GUARDIAN_CONFIG.plantTreeRadius,
+		},
+		position,
+	)
+	if (!newTree) return
+
+	treeResources.push(newTree)
+	spawnTreeVisual(newTree)
+}
+
+// 生成树的视觉对象（从 spawnTreeInstances 和 spawnNewTree 中抽取的公共逻辑）
+function spawnTreeVisual(tree: TreeResource) {
+	const template = liveTreeTemplates.get(tree.modelIndex)
+	if (!template || treeObjects.has(tree.id)) return
+
+	const object = new Group()
+	const model = template.clone(true)
+	model.rotation.y = tree.rotation
+	model.scale.multiplyScalar(tree.scale)
+	object.add(model)
+	object.position.set(tree.position[0], 0, tree.position[1])
+	treeObjects.set(tree.id, object)
+	treeGroup?.add(object)
 }
 
 function createPlayer(targetScene: Scene) {
@@ -366,8 +455,37 @@ function renderFrame() {
 	animationFrame = window.requestAnimationFrame(renderFrame)
 	if (!clock || !renderer || !scene || !camera || !playerAgent || !playerModel) return
 
+	// Game Over 时冻结游戏但继续渲染
+	if (gameOver.value) {
+		renderer.render(scene, camera)
+		return
+	}
+
 	const delta = clock.getDelta()
 	const now = performance.now()
+
+	// 1. 更新昼夜循环
+	const dayResult = dayCycle?.update(delta * 1000)
+	if (dayResult?.isNewDay) {
+		currentDay.value = dayResult.dayNumber
+		// 每天扣减木头
+		playerAgent.woodCollected -= DAY_CYCLE_CONFIG.woodConsumedPerDay
+		if (playerAgent.woodCollected <= 0) {
+			playerAgent.playerAlive = false
+			playerAlive.value = false
+			gameOver.value = true
+		}
+	}
+
+	// 更新光照
+	if (dayCycle && lightingController) {
+		lightingController.update(dayCycle.state.dayProgress, dayCycle.state.timeOfDay)
+	}
+
+	// 低木头警告
+	lowWoodWarning.value = playerAgent.playerAlive && playerAgent.woodCollected > 0 && playerAgent.woodCollected <= DAY_CYCLE_CONFIG.woodConsumedPerDay * 2
+
+	// 2. 更新玩家
 	const prevWood = playerAgent.woodCollected
 	const prevAnim = playerAgent.animation
 
@@ -375,21 +493,22 @@ function renderFrame() {
 	syncPlayerVisuals()
 
 	if (playerAgent.woodCollected !== prevWood) {
-		woodCount.value = playerAgent.woodCollected
+		woodCount.value = Math.max(0, playerAgent.woodCollected)
 	}
 	choppingProgress.value = playerAgent.choppingProgress
-		if (playerAgent.lastCollectedTree) {
-			replaceTreeWithDeadModel(playerAgent.lastCollectedTree)
-			playerAgent.lastCollectedTree = null
-		}
+	if (playerAgent.lastCollectedTree) {
+		replaceTreeWithDeadModel(playerAgent.lastCollectedTree)
+		playerAgent.lastCollectedTree = null
+	}
 	if (playerAgent.animation !== prevAnim && playerAnimation) {
 		playerAnimation.play(playerAgent.animation)
 	}
 
-	
-
-	updateFadingTrees()
+	// 3. 更新怪物
 	updateMonsters(delta, now)
+
+	// 4. 现有系统
+	updateFadingTrees()
 	playerAnimation?.update(delta)
 	updateCamera()
 	renderer.render(scene, camera)
@@ -404,8 +523,26 @@ function syncPlayerVisuals() {
 
 function updateMonsters(delta: number, now: number) {
 	if (!playerAgent) return
+
+	const monsterContext: MonsterUpdateContext = {
+		playerPosition: playerAgent.position,
+		playerAlive: playerAgent.playerAlive,
+		playerIsChopping: playerAgent.state === 'chopping',
+		onAttackPlayer: () => {
+			// 怪物攻击：偷走玩家的木头
+			if (!playerAgent) return
+			playerAgent.woodCollected -= MONSTER_CONFIG.attackDamage
+			woodCount.value = Math.max(0, playerAgent.woodCollected)
+			if (playerAgent.woodCollected <= 0) {
+				playerAgent.playerAlive = false
+				playerAlive.value = false
+				gameOver.value = true
+			}
+		},
+	}
+
 	for (const agent of monsterAgents) {
-		agent.update(delta, now, playerAgent.position, true)
+		agent.update(delta, now, monsterContext)
 		const obj = monsterObjects.get(agent.resource.id)
 		const anim = monsterAnimations.get(agent.resource.id)
 		if (!obj) continue
@@ -509,18 +646,7 @@ function spawnNewTree() {
 	if (!newTree) return
 
 	treeResources.push(newTree)
-
-	const template = liveTreeTemplates.get(newTree.modelIndex)
-	if (!template) return
-
-	const object = new Group()
-	const model = template.clone(true)
-	model.rotation.y = newTree.rotation
-	model.scale.multiplyScalar(newTree.scale)
-	object.add(model)
-	object.position.set(newTree.position[0], 0, newTree.position[1])
-	treeObjects.set(newTree.id, object)
-	treeGroup?.add(object)
+	spawnTreeVisual(newTree)
 }
 
 function updateCamera() {
@@ -574,10 +700,11 @@ function drawMinimap() {
 
 	ctx.clearRect(0, 0, size, size)
 
-	// 世界背景
+	// 世界背景（夜晚变暗）
+	const bgAlpha = dayCycle?.state.isNight ? 0.92 : 0.85
 	ctx.beginPath()
 	ctx.arc(cx, cy, WORLD_RADIUS * scale, 0, Math.PI * 2)
-	ctx.fillStyle = 'rgba(12, 40, 31, 0.85)'
+	ctx.fillStyle = `rgba(12, 40, 31, ${bgAlpha})`
 	ctx.fill()
 
 	// 世界边界
@@ -604,10 +731,11 @@ function drawMinimap() {
 		ctx.fill()
 	}
 
-	// 怪物（红色点）
-	ctx.fillStyle = '#ff4444'
+	// 怪物：看管者模式，用橙色显示
 	for (const agent of monsterAgents) {
 		if (agent.resource.health <= 0) continue
+		// 种植中的怪物用绿色，其他用橙色
+		ctx.fillStyle = agent.state === 'tendPlants' ? '#2ecc71' : '#ff8c00'
 		ctx.beginPath()
 		ctx.arc(toX(agent.position[0]), toY(agent.position[1]), 3, 0, Math.PI * 2)
 		ctx.fill()
@@ -677,6 +805,18 @@ function handleResize() {
 	renderer.setSize(clientWidth, clientHeight)
 }
 
+function restartGame() {
+	disposeScene()
+
+	// 重置游戏状态
+	currentDay.value = 1
+	playerAlive.value = true
+	gameOver.value = false
+	lowWoodWarning.value = false
+
+	createScene()
+}
+
 function disposeScene() {
 	if (animationFrame) {
 		window.cancelAnimationFrame(animationFrame)
@@ -726,6 +866,12 @@ function disposeScene() {
 	liveTreeTemplates.clear()
 	treeObjects.clear()
 	envTemplates.clear()
+	dayCycle = null
+	lightingController = null
+	hemisphereLight = null
+	ambientLight = null
+	keyLight = null
+	rimLight = null
 }
 </script>
 
@@ -765,6 +911,14 @@ function disposeScene() {
 	backdrop-filter: blur(12px);
 }
 
+.resource-panel__day {
+	font-size: 16px;
+	font-weight: 700;
+	color: #ffc857;
+	margin-bottom: 8px;
+	text-shadow: 0 0 12px rgba(255, 200, 87, 0.4);
+}
+
 .resource-panel__label,
 .resource-panel__hint {
 	font-size: 12px;
@@ -781,9 +935,24 @@ function disposeScene() {
 	text-shadow: 0 0 18px rgba(53, 244, 255, 0.45);
 }
 
+.resource-panel__consumption {
+	font-size: 11px;
+	opacity: 0.55;
+	margin-top: 4px;
+	letter-spacing: 0.02em;
+}
+
 .resource-panel__hint {
 	margin-top: 8px;
 	letter-spacing: 0.02em;
+}
+
+.resource-panel__warning {
+	margin-top: 6px;
+	font-size: 12px;
+	font-weight: 700;
+	color: #ff4444;
+	animation: warning-pulse 1s ease-in-out infinite;
 }
 
 .resource-panel__progress {
@@ -845,6 +1014,67 @@ function disposeScene() {
 	&:hover {
 		background: rgba(53, 244, 255, 0.15);
 	}
+}
+
+.game-over-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 100;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: rgba(0, 0, 0, 0.75);
+	backdrop-filter: blur(8px);
+	animation: fade-in 0.8s ease-out;
+}
+
+.game-over-content {
+	text-align: center;
+	color: #dffcff;
+	font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+	h2 {
+		font-size: 48px;
+		font-weight: 800;
+		margin: 0 0 16px;
+		color: #ff4444;
+		text-shadow: 0 0 30px rgba(255, 68, 68, 0.5);
+	}
+
+	p {
+		font-size: 18px;
+		margin: 8px 0;
+		opacity: 0.8;
+	}
+}
+
+.game-over-btn {
+	margin-top: 24px;
+	padding: 12px 32px;
+	border: 1px solid rgba(53, 244, 255, 0.5);
+	border-radius: 12px;
+	background: rgba(53, 244, 255, 0.15);
+	color: #35f4ff;
+	font-size: 18px;
+	font-weight: 600;
+	cursor: pointer;
+	transition: all 0.2s;
+	font-family: inherit;
+
+	&:hover {
+		background: rgba(53, 244, 255, 0.3);
+		box-shadow: 0 0 20px rgba(53, 244, 255, 0.3);
+	}
+}
+
+@keyframes warning-pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.4; }
+}
+
+@keyframes fade-in {
+	from { opacity: 0; }
+	to { opacity: 1; }
 }
 </style>
 

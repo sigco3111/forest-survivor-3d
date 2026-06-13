@@ -111,13 +111,18 @@ export function createRandomTree(
 	existingTrees: TreeResource[],
 	modelCount: number,
 	config: { radiusMeters: number; modelScale: number; woodPerTree: number; respawnMinSpacing: number },
+	forcedPosition?: PlanePoint,
 ): TreeResource | null {
 	const maxRadius = config.radiusMeters * 0.8
 
 	for (let attempt = 0; attempt < 10; attempt++) {
-		const angle = Math.random() * Math.PI * 2
-		const dist = Math.random() * maxRadius
-		const position: PlanePoint = [Math.cos(angle) * dist, Math.sin(angle) * dist]
+		const position: PlanePoint = forcedPosition
+			? [...forcedPosition]
+			: (() => {
+					const angle = Math.random() * Math.PI * 2
+					const dist = Math.random() * maxRadius
+					return [Math.cos(angle) * dist, Math.sin(angle) * dist] as PlanePoint
+				})()
 
 		const tooClose = existingTrees.some(tree => {
 			if (tree.collected) return false

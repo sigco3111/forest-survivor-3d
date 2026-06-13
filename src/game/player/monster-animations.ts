@@ -5,7 +5,7 @@ import {
 	Object3D,
 } from 'three'
 
-export type MonsterAnimationName = 'idle' | 'walk' | 'run' | 'attack' | 'death' | 'hit'
+export type MonsterAnimationName = 'idle' | 'walk' | 'run' | 'attack' | 'death' | 'hit' | 'tend'
 
 export type MonsterAnimationController = {
 	play: (name: MonsterAnimationName) => void
@@ -19,6 +19,7 @@ const ANIMATION_PATTERN: Record<MonsterAnimationName, RegExp> = {
 	attack: /(?:^|\|)attack$/i,
 	death: /(?:^|\|)death$/i,
 	hit: /(?:^|\|)hitrecieve$/i,
+	tend: /(?:^|\|)(?:interact|punch|tending)$/i,
 }
 
 const ANIMATION_FALLBACK: Record<MonsterAnimationName, number> = {
@@ -28,6 +29,7 @@ const ANIMATION_FALLBACK: Record<MonsterAnimationName, number> = {
 	attack: 0,
 	death: 1,
 	hit: 2,
+	tend: 3,
 }
 
 export function createMonsterAnimationController(
@@ -43,6 +45,7 @@ export function createMonsterAnimationController(
 		attack: createAction(mixer, animations, 'attack'),
 		death: createAction(mixer, animations, 'death'),
 		hit: createAction(mixer, animations, 'hit'),
+		tend: createAction(mixer, animations, 'tend'),
 	}
 	let currentAction: AnimationAction | null = null
 
