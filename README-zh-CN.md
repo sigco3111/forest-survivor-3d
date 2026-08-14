@@ -1,7 +1,7 @@
 # Forest Survivor 3D
 
 <!-- repo-languages:start -->
-English | [简体中文](README-zh-CN.md)
+[English](README.md) | 简体中文
 <!-- repo-languages:end -->
 
 <!-- repo-badges:start -->
@@ -17,19 +17,18 @@ English | [简体中文](README-zh-CN.md)
 [![Sponsor](https://img.shields.io/github/sponsors/shenzhepei?style=flat-square&logo=githubsponsors&label=Sponsor)](https://github.com/sponsors/shenzhepei)
 <!-- repo-badges:end -->
 
-A browser-based 3D forest survival game. Collect wood continuously, meet the
-daily resource cost, and avoid monsters while they patrol, guard, and chase.
+一款运行在浏览器中的 3D 森林生存游戏。玩家需要在森林中持续收集木材，应对每日资源消耗，并避开巡逻、守卫和追击中的怪物。
 
-## Features
+## 游戏特色
 
-- Real-time 3D forest environment powered by Three.js
-- Player agent with automatic movement, pathfinding, and woodcutting
-- Monster AI with patrol, guard, and chase behaviors
-- Day-night cycle with dynamic lighting
-- Wood collection, daily consumption, and survival-day mechanics
-- Minimap, follow camera, and free-camera modes
+- 基于 Three.js 的实时 3D 森林场景
+- 自动移动、寻路和伐木的玩家 Agent
+- 具备巡逻、守卫与追击行为的怪物 AI
+- 昼夜循环与动态光照
+- 木材收集、每日消耗和生存天数机制
+- 小地图、跟随视角与自由视角切换
 
-## Tech Stack
+## 技术栈
 
 - Nuxt 3
 - Vue 3
@@ -37,22 +36,22 @@ daily resource cost, and avoid monsters while they patrol, guard, and chase.
 - Three.js
 - WebGL
 
-## Local Development
+## 本地运行
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-The development server runs at `http://localhost:4000` by default.
+开发服务器默认运行在 `http://localhost:4000`。
 
-## Build
+## 构建
 
 ```bash
 pnpm build
 ```
 
-## Test
+## 测试
 
 ```bash
 pnpm test
