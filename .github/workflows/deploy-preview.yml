@@ -1,0 +1,56 @@
+name: Deploy preview
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dist-pages-forest-survivor-3d
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out game
+        uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Generate static site
+        run: pnpm generate
+        env:
+          NUXT_APP_BASE_URL: /dist-pages/forest-survivor-3d/
+
+      - name: Check out preview site
+        uses: actions/checkout@v4
+        with:
+          repository: shenzhepei/dist-pages
+          ssh-key: ${{ secrets.PREVIEW_DEPLOY_KEY }}
+          path: dist-pages
+
+      - name: Publish game
+        run: |
+          rsync -a --delete --exclude .git .output/public/ dist-pages/forest-survivor-3d/
+          touch dist-pages/.nojekyll
+          cd dist-pages
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add --all
+          git diff --cached --quiet && exit 0
+          git commit -m "Deploy forest-survivor-3d@${GITHUB_SHA::7}"
+          git push

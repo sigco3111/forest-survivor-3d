@@ -110,6 +110,9 @@ defineOptions({
 	name: 'GameScene',
 })
 
+const appBaseURL = useRuntimeConfig().app.baseURL
+const assetURL = (path: string) => `${appBaseURL}${path.replace(/^\/+/, '')}`
+
 const sceneContainer = ref<HTMLDivElement | null>(null)
 const minimapCanvas = ref<HTMLCanvasElement | null>(null)
 const choppingProgress = ref(0)
@@ -220,7 +223,7 @@ function createScene() {
 }
 
 function addEnvironment(targetScene: Scene) {
-	new TextureLoader().load('/sky/sky.jpg', texture => {
+	new TextureLoader().load(assetURL('/sky/sky.jpg'), texture => {
 		targetScene.background = texture
 	})
 
@@ -272,7 +275,7 @@ function createTrees(targetScene: Scene) {
 
 	TREE_RESOURCE_CONFIG.modelUrls.forEach((modelUrl, modelIndex) => {
 		new GLTFLoader().load(
-			modelUrl,
+			assetURL(modelUrl),
 			gltf => {
 				const template = normalizeModel(gltf.scene)
 				liveTreeTemplates.set(modelIndex, template)
@@ -285,7 +288,7 @@ function createTrees(targetScene: Scene) {
 
 	TREE_RESOURCE_CONFIG.deadModelUrls.forEach((modelUrl, modelIndex) => {
 		new GLTFLoader().load(
-			modelUrl,
+			assetURL(modelUrl),
 			gltf => {
 				deadTreeTemplates.set(modelIndex, normalizeModel(gltf.scene))
 			},
@@ -325,7 +328,7 @@ function createEnvObjects(targetScene: Scene) {
 
 	allUrls.forEach(({ category, index }, url) => {
 		new GLTFLoader().load(
-			url,
+			assetURL(url),
 			gltf => {
 				const template = normalizeModel(gltf.scene)
 				envTemplates.set(`${category}-${index}`, template)
@@ -358,7 +361,7 @@ function createMonsters(targetScene: Scene) {
 	monsterResources.forEach(m => {
 		const modelUrl = MONSTER_CONFIG.modelUrls[m.modelIndex]
 		new GLTFLoader().load(
-			modelUrl,
+			assetURL(modelUrl),
 			gltf => {
 				if (monsterObjects.has(m.id)) return
 
@@ -445,7 +448,7 @@ function createPlayer(targetScene: Scene) {
 	})
 
 	new GLTFLoader().load(
-		PLAYER_CONFIG.url,
+		assetURL(PLAYER_CONFIG.url),
 		gltf => {
 			if (!playerModel) return
 

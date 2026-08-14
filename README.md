@@ -20,6 +20,8 @@ English | [简体中文](README-zh-CN.md)
 A browser-based 3D forest survival game. Collect wood continuously, meet the
 daily resource cost, and avoid monsters while they patrol, guard, and chase.
 
+**[Play online](https://shenzhepei.github.io/dist-pages/forest-survivor-3d/)**
+
 ## Features
 
 - Real-time 3D forest environment powered by Three.js

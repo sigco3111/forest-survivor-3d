@@ -13,7 +13,8 @@
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "test:build": "nuxt build",
-    "build": "nuxt build"
+    "build": "nuxt build",
+    "generate": "nuxt generate"
   },
   "dependencies": {
     "nuxt": "^3.21.8",

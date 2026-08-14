@@ -1,10 +1,14 @@
 export default defineNuxtConfig({
 	srcDir: 'src/',
+	dir: {
+		public: '../public',
+	},
 	compatibilityDate: '2026-06-12',
 	devtools: {
 		enabled: false,
 	},
 	app: {
+		baseURL: process.env.NUXT_APP_BASE_URL || '/',
 		head: {
 			htmlAttrs: {
 				lang: 'zh',
@@ -17,7 +21,6 @@ export default defineNuxtConfig({
 						'width=device-width, viewport-fit=cover, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no',
 				},
 			],
-			link: [{ rel: 'icon', href: '/favicon.ico' }],
 		},
 	},
 	vite: {
