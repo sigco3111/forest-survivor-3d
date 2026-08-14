@@ -42,15 +42,34 @@ jobs:
           repository: shenzhepei/dist-pages
           ssh-key: ${{ secrets.PREVIEW_DEPLOY_KEY }}
           path: dist-pages
+          fetch-depth: 0
 
       - name: Publish game
+        shell: bash
         run: |
+          set -euo pipefail
+
           rsync -a --delete --exclude .git .output/public/ dist-pages/forest-survivor-3d/
           touch dist-pages/.nojekyll
           cd dist-pages
+
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add --all
+          git add --all -- forest-survivor-3d .nojekyll
           git diff --cached --quiet && exit 0
           git commit -m "Deploy forest-survivor-3d@${GITHUB_SHA::7}"
-          git push
+
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 5 ]; then
+              echo "Failed to publish after $attempt attempts." >&2
+              exit 1
+            fi
+
+            git fetch origin main
+            git rebase origin/main
+            sleep "$((attempt * 2))"
+          done
