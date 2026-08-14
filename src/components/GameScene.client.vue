@@ -67,44 +67,44 @@ import {
 	MONSTER_GUARDIAN_CONFIG,
 	PLAYER_CONFIG,
 	TREE_RESOURCE_CONFIG,
-} from '../src/config'
+} from '~/config'
 import {
 	createPlayerAnimationController,
 	type PlayerAnimationController,
-} from '../src/game/player/animations'
+} from '~/game/player/animations'
 import {
 	createPlayerAgent,
 	type PlayerAgent,
-} from '../src/game/player/agent'
+} from '~/game/player/agent'
 import {
 	createEnvironmentObjects,
 	type EnvironmentObject,
-} from '../src/game/resources/environment'
+} from '~/game/resources/environment'
 import {
 	createNoiseTrees,
 	createRandomTree,
 	type PlanePoint,
 	type TreeResource,
-} from '../src/game/resources/trees'
+} from '~/game/resources/trees'
 import {
 	createMonsterAnimationController,
 	type MonsterAnimationController,
-} from '../src/game/player/monster-animations'
+} from '~/game/player/monster-animations'
 import {
 	createMonsterAgent,
 	createMonsterResources,
 	type MonsterAgent,
 	type MonsterResource,
 	type MonsterUpdateContext,
-} from '../src/game/resources/monsters'
+} from '~/game/resources/monsters'
 import {
 	createDayCycle,
 	type DayCycleState,
-} from '../src/game/time/day-cycle'
+} from '~/game/time/day-cycle'
 import {
 	createLightingController,
 	type LightingController,
-} from '../src/game/time/lighting'
+} from '~/game/time/lighting'
 
 defineOptions({
 	name: 'GameScene',
