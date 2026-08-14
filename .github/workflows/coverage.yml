@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   coverage:
@@ -32,5 +33,5 @@ jobs:
         with:
           files: ./coverage/lcov.info
           slug: shenzhepei/forest-survivor-3d
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           fail_ci_if_error: true
