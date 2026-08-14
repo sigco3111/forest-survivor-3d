@@ -1,4 +1,4 @@
-name: Deploy preview
+name: Pages
 
 on:
   push:
@@ -7,15 +7,20 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 concurrency:
-  group: dist-pages-forest-survivor-3d
+  group: pages
   cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Check out game
         uses: actions/checkout@v7
@@ -31,45 +36,19 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
       - name: Generate static site
         run: pnpm generate
         env:
-          NUXT_APP_BASE_URL: /dist-pages/forest-survivor-3d/
+          NUXT_APP_BASE_URL: /forest-survivor-3d/
 
-      - name: Check out preview site
-        uses: actions/checkout@v7
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
         with:
-          repository: shenzhepei/dist-pages
-          ssh-key: ${{ secrets.PREVIEW_DEPLOY_KEY }}
-          path: dist-pages
-          fetch-depth: 0
+          path: .output/public
 
-      - name: Publish game
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rsync -a --delete --exclude .git .output/public/ dist-pages/forest-survivor-3d/
-          touch dist-pages/.nojekyll
-          cd dist-pages
-
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add --all -- forest-survivor-3d .nojekyll
-          git diff --cached --quiet && exit 0
-          git commit -m "Deploy forest-survivor-3d@${GITHUB_SHA::7}"
-
-          for attempt in 1 2 3 4 5; do
-            if git push origin HEAD:main; then
-              exit 0
-            fi
-
-            if [ "$attempt" -eq 5 ]; then
-              echo "Failed to publish after $attempt attempts." >&2
-              exit 1
-            fi
-
-            git fetch origin main
-            git rebase origin/main
-            sleep "$((attempt * 2))"
-          done
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -19,7 +19,7 @@
 
 一款运行在浏览器中的 3D 森林生存游戏。玩家需要在森林中持续收集木材，应对每日资源消耗，并避开巡逻、守卫和追击中的怪物。
 
-**[在线试玩](https://shenzhepei.github.io/dist-pages/forest-survivor-3d/)**
+**[在线试玩](https://shenzhepei.github.io/forest-survivor-3d/)**
 
 ## 游戏特色
 
