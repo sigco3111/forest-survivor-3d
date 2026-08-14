@@ -1,30 +1,70 @@
-# Nuxt dev/build outputs
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Nuxt and build output
 .nuxt/
 .nuxt-app/
 .nuxt-app-build/
 .output/
+.nitro/
+.data/
 dist/
+
+# Tests and coverage
+coverage/
 output/
-.vite-cache/
+playwright-report/
+test-results/
+
+# Tool caches and temporary files
+.cache/
+.tmp/
 .vendor/
-.tmp/*
-!.tmp/.gitkeep
+.vite/
+.vite-cache/
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
 
-# Node
-node_modules/
-*.log*
+# Logs
+logs/
+*.log
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# Env
+# Local environment and data
 .env
-
-# Database
+.env.*
+!.env.example
+!.env.*.example
+*.local
 data/
 
-# IDE
-.codex/
-.vscode/
-.idea/
+# Deployment tool state
+.netlify/
+.vercel/
 
-# OS
+# Editors and local tools
+.codex/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/setting.json
+!.vscode/settings.json
+!.vscode/*.code-snippets
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Operating system files
 .DS_Store
+.AppleDouble
+.LSOverride
 Thumbs.db
+Desktop.ini
