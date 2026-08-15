@@ -22,6 +22,8 @@ daily resource cost, and avoid monsters while they patrol, guard, and chase.
 
 **[Play online](https://shenzhepei.github.io/forest-survivor-3d/)**
 
+![Forest Survivor 3D gameplay](docs/preview.webp)
+
 ## Features
 
 - Real-time 3D forest environment powered by Three.js

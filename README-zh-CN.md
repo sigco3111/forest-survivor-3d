@@ -21,6 +21,8 @@
 
 **[在线试玩](https://shenzhepei.github.io/forest-survivor-3d/)**
 
+![Forest Survivor 3D 游戏画面](docs/preview.webp)
+
 ## 游戏特色
 
 - 基于 Three.js 的实时 3D 森林场景
