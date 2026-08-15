@@ -1,3 +1,5 @@
+const baseURL = process.env.NUXT_APP_BASE_URL || '/'
+
 export default defineNuxtConfig({
 	srcDir: 'src/',
 	dir: {
@@ -8,11 +10,12 @@ export default defineNuxtConfig({
 		enabled: false,
 	},
 	app: {
-		baseURL: process.env.NUXT_APP_BASE_URL || '/',
+		baseURL,
 		head: {
 			htmlAttrs: {
 				lang: 'zh',
 			},
+			link: [{ rel: 'icon', type: 'image/png', href: `${baseURL}favicon.png` }],
 			meta: [
 				{ charset: 'utf-8' },
 				{
