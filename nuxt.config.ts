@@ -2,6 +2,17 @@ const baseURL = process.env.NUXT_APP_BASE_URL || '/'
 
 export default defineNuxtConfig({
 	srcDir: 'src/',
+	modules: ['@nuxtjs/i18n'],
+	i18n: {
+		defaultLocale: 'en',
+		locales: [
+			{ code: 'en', language: 'en' },
+			{ code: 'zh-CN', language: 'zh-CN' },
+		],
+		strategy: 'no_prefix',
+		detectBrowserLanguage: false,
+		vueI18n: '../i18n.config.ts',
+	},
 	dir: {
 		public: '../public',
 	},
@@ -13,7 +24,7 @@ export default defineNuxtConfig({
 		baseURL,
 		head: {
 			htmlAttrs: {
-				lang: 'zh',
+				lang: 'en',
 			},
 			link: [{ rel: 'icon', type: 'image/png', href: `${baseURL}favicon.png` }],
 			meta: [

@@ -12,6 +12,7 @@ English | [简体中文](README-zh-CN.md)
 [![Three.js 0.184.0](https://img.shields.io/badge/Three.js-0.184.0-000000?style=flat-square&logo=threedotjs&logoColor=white)](https://threejs.org)
 [![Vite 7.3.5](https://img.shields.io/badge/Vite-7.3.5-646CFF?style=flat-square&logo=vite&logoColor=white)](https://vite.dev)
 [![TypeScript 5.8.3](https://img.shields.io/badge/TypeScript-5.8.3-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Sass 1.57.1](https://img.shields.io/badge/Sass-1.57.1-CC6699?style=flat-square&logo=sass&logoColor=white)](https://sass-lang.com)
 [![Test Coverage](https://img.shields.io/codecov/c/github/shenzhepei/forest-survivor-3d?style=flat-square&logo=codecov)](https://codecov.io/gh/shenzhepei/forest-survivor-3d)
 [![License](https://img.shields.io/github/license/shenzhepei/forest-survivor-3d?style=flat-square)](https://github.com/shenzhepei/forest-survivor-3d/blob/HEAD/LICENSE)
 [![Sponsor](https://img.shields.io/github/sponsors/shenzhepei?style=flat-square&logo=githubsponsors&label=Sponsor)](https://github.com/sponsors/shenzhepei)
@@ -32,6 +33,7 @@ daily resource cost, and avoid monsters while they patrol, guard, and chase.
 - Day-night cycle with dynamic lighting
 - Wood collection, daily consumption, and survival-day mechanics
 - Minimap, follow camera, and free-camera modes
+- English-default interface with a persistent English and Simplified Chinese switcher
 
 ## Tech Stack
 

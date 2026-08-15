@@ -1,13 +1,17 @@
 <template>
 	<div class="game-stage">
 		<div ref="sceneContainer" class="scene-container"></div>
+		<div class="language-switcher" role="group" :aria-label="t('language.label')">
+			<button type="button" :class="{ active: locale === 'en' }" @click="changeLocale('en')">English</button>
+			<button type="button" :class="{ active: locale === 'zh-CN' }" @click="changeLocale('zh-CN')">简体中文</button>
+		</div>
 		<div class="resource-panel">
-			<div class="resource-panel__day">第 {{ currentDay }} 天</div>
-			<div class="resource-panel__label">木材</div>
+			<div class="resource-panel__day">{{ t('hud.day', { day: currentDay }) }}</div>
+			<div class="resource-panel__label">{{ t('hud.wood') }}</div>
 			<div class="resource-panel__value">{{ woodCount }}</div>
-			<div class="resource-panel__consumption">每日消耗 -{{ woodPerDay }} 木材</div>
+			<div class="resource-panel__consumption">{{ t('hud.dailyUse', { count: woodPerDay }) }}</div>
 			<div class="resource-panel__hint">{{ choppingHint }}</div>
-			<div v-if="lowWoodWarning" class="resource-panel__warning">⚠ 木材不足！</div>
+			<div v-if="lowWoodWarning" class="resource-panel__warning">{{ t('hud.lowWood') }}</div>
 			<div v-if="choppingProgress > 0" class="resource-panel__progress">
 				<div
 					class="resource-panel__progress-bar"
@@ -18,15 +22,15 @@
 		<div class="minimap-wrapper">
 			<canvas ref="minimapCanvas" class="minimap-canvas" />
 		</div>
-		<button class="minimap-toggle" @click="toggleCameraMode" :title="cameraMode === 'follow' ? '切换自由视角' : '切换跟随视角'">
+		<button class="minimap-toggle" @click="toggleCameraMode" :title="t(cameraMode === 'follow' ? 'camera.free' : 'camera.follow')">
 			{{ cameraMode === 'follow' ? '🔒' : '🔓' }}
 		</button>
 		<div v-if="gameOver" class="game-over-overlay">
 			<div class="game-over-content">
-				<h2>游戏结束</h2>
-				<p>你存活了 {{ currentDay - 1 }} 天</p>
-				<p>木材耗尽，你在寒夜中倒下</p>
-				<button class="game-over-btn" @click="restartGame">重新开始</button>
+				<h2>{{ t('gameOver.title') }}</h2>
+				<p>{{ t('gameOver.survived', { days: currentDay - 1 }) }}</p>
+				<p>{{ t('gameOver.exhausted') }}</p>
+				<button class="game-over-btn" @click="restartGame">{{ t('gameOver.restart') }}</button>
 			</div>
 		</div>
 	</div>
@@ -58,6 +62,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+
+import { readStoredLocale, storeLocale, type AppLocale } from '~/i18n/language'
 
 import {
 	DEAD_TREE_CONFIG,
@@ -111,7 +117,18 @@ defineOptions({
 })
 
 const appBaseURL = useRuntimeConfig().app.baseURL
+const { locale, setLocale, t } = useI18n()
 const assetURL = (path: string) => `${appBaseURL}${path.replace(/^\/+/, '')}`
+
+async function changeLocale(nextLocale: AppLocale): Promise<void> {
+	await setLocale(nextLocale)
+	document.documentElement.lang = nextLocale
+	storeLocale(localStorage, nextLocale)
+}
+
+onMounted(() => {
+	void changeLocale(readStoredLocale(localStorage))
+})
 
 const sceneContainer = ref<HTMLDivElement | null>(null)
 const minimapCanvas = ref<HTMLCanvasElement | null>(null)
@@ -124,12 +141,12 @@ const lowWoodWarning = ref(false)
 const woodPerDay = DAY_CYCLE_CONFIG.woodConsumedPerDay
 const cameraMode = ref<'follow' | 'free'>('follow')
 const choppingHint = computed(() => {
-	if (gameOver.value) return '游戏结束'
+	if (gameOver.value) return t('hud.gameOver')
 	if (choppingProgress.value > 0) {
-		return `伐木中 ${Math.round(choppingProgress.value * 100)}%`
+		return t('hud.chopping', { progress: Math.round(choppingProgress.value * 100) })
 	}
 
-	return '靠近树木开始伐木'
+	return t('hud.approachTree')
 })
 
 let animationFrame = 0
@@ -908,6 +925,36 @@ function disposeScene() {
 	height: 100%;
 }
 
+.language-switcher {
+	position: absolute;
+	top: 20px;
+	left: 50%;
+	z-index: 12;
+	display: flex;
+	padding: 3px;
+	border: 1px solid rgba(53, 244, 255, 0.32);
+	border-radius: 6px;
+	background: rgba(3, 12, 24, 0.78);
+	transform: translateX(-50%);
+	backdrop-filter: blur(12px);
+
+	button {
+		min-height: 30px;
+		padding: 0 10px;
+		border: 0;
+		border-radius: 4px;
+		background: transparent;
+		color: rgba(223, 252, 255, 0.72);
+		cursor: pointer;
+		font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
+
+		&.active {
+			background: #35f4ff;
+			color: #031018;
+		}
+	}
+}
+
 .resource-panel {
 	position: absolute;
 	top: 20px;
@@ -1077,6 +1124,13 @@ function disposeScene() {
 	&:hover {
 		background: rgba(53, 244, 255, 0.3);
 		box-shadow: 0 0 20px rgba(53, 244, 255, 0.3);
+	}
+}
+
+@media (max-width: 600px) {
+	.language-switcher {
+		top: auto;
+		bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
 	}
 }
 
