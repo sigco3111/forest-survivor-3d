@@ -72,6 +72,7 @@ export const WEAPON_CONFIG = {
   upgradeCostGrowth: 1.5,  // 강화 비용 증가율 (30 → 45 → 68 ...)
   attackPerTier: 6,        // 티어당 공격력 증가
   powerPerTier: 40,        // 티어당 전투력 증가 (소비한 나무보다 크게 — 강화가 항상 이득)
+  reserveWood: 10,         // 강화 후에도 유지할 비상 나무 (자동 강화가 비축을 갈취하지 않도록)
 };
 
 // 昼夜循环：1 分钟 = 游戏内 1 天

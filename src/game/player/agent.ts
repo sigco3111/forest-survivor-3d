@@ -59,6 +59,7 @@ export type PlayerAgentConfig = {
 	upgradeCostGrowth: number         // 무기 강화 비용 증가율
 	weaponAttackPerTier: number       // 무기 티어당 공격력 증가
 	weaponPowerPerTier: number        // 무기 티어당 전투력 증가
+	reserveWood: number               // 강화 후에도 유지할 비상 나무
 	playerBasePower: number           // 플레이어 기본 전투력
 	powerPerWood: number              // 나무 1개당 전투력 증가량
 	monsterHealthPowerWeight: number  // 몬스터 체력 → 위협 전투력 가중치
@@ -191,7 +192,8 @@ export function createPlayerAgent(
 
 		upgradeWeapon() {
 			const cost = this.nextUpgradeCost()
-			if (this.woodCollected < cost) return false
+			// 비상 나무 비축(reserveWood)을 남기고 강화한다 — 자동 강화가 생존 자원을 갈취하지 않도록
+			if (this.woodCollected - cost < config.reserveWood) return false
 			this.woodCollected -= cost
 			this.weaponTier += 1
 			this.attackDamage += config.weaponAttackPerTier

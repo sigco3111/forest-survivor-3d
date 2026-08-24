@@ -61,6 +61,7 @@ function makeConfig(overrides: Partial<PlayerAgentConfig> = {}): PlayerAgentConf
     upgradeCostGrowth: 1.5,
     weaponAttackPerTier: 6,
     weaponPowerPerTier: 40,
+    reserveWood: 10,
     playerBasePower: 40,
     powerPerWood: 1,
     monsterHealthPowerWeight: 0.35,
@@ -250,7 +251,13 @@ describe('player agent', () => {
     expect(agent.upgradeWeapon()).toBe(false)
     expect(agent.weaponTier).toBe(0)
 
-    // 강화 성공: 나무 30 소비, 공격 +6, 전투력 가중 +40
+    // 비상 비축(10)을 남기는지 검증: 강화 후 9가 남는 39는 거절
+    agent.woodCollected = 39
+    expect(agent.upgradeWeapon()).toBe(false)
+    expect(agent.weaponTier).toBe(0)
+    expect(agent.woodCollected).toBe(39)
+
+    // 강화 성공: 나무 30 소비, 비축 10 정확히 남김 (경계값 포함), 공격 +6, 전투력 가중 +40
     agent.woodCollected = 40
     expect(agent.upgradeWeapon()).toBe(true)
     expect(agent.weaponTier).toBe(1)
@@ -260,14 +267,14 @@ describe('player agent', () => {
     expect(agent.nextUpgradeCost()).toBe(45) // 30 × 1.5
   })
 
-  it('auto-upgrades the weapon every frame while wood affords it', () => {
+  it('auto-upgrades the weapon every frame while wood affords it (reserve kept)', () => {
     const config = makeConfig()
     const agent = createPlayerAgent([0, 0], config)
     agent.woodCollected = 100
 
     agent.update(0, 0)
 
-    // 30 소비(잔여 70) → 45 소비(잔여 25) → 다음 68은 부족 → 정지
+    // 30 소비(잔여 70) → 45 소비(잔여 25, 비축 10 이상) → 다음 68은 비축 미달 → 정지
     expect(agent.weaponTier).toBe(2)
     expect(agent.woodCollected).toBe(25)
     expect(agent.attackDamage).toBe(29) // 17 + 6×2

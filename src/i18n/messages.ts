@@ -22,6 +22,7 @@ export const messages = {
 				kills: 'Monsters killed: {count}',
 				attacking: 'Attacking {progress}%',
 				reward: '+{count} wood',
+				upgrade: 'Weapon Lv.{tier} upgraded (-{count} wood)',
 			},
 			status: {
 				title: 'Player Status',
@@ -89,6 +90,7 @@ export const messages = {
 				kills: '已击杀怪物：{count}',
 				attacking: '攻击中 {progress}%',
 				reward: '+{count} 木材',
+				upgrade: '武器强化至 Lv.{tier}（-{count} 木材）',
 			},
 			status: {
 				title: '玩家状态',
@@ -156,6 +158,7 @@ export const messages = {
 				kills: '처치한 몬스터: {count}',
 				attacking: '공격 중 {progress}%',
 				reward: '+{count} 나무',
+				upgrade: '무기 강화 Lv.{tier} (-{count} 나무)',
 			},
 			status: {
 				title: '플레이어 상태',

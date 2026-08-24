@@ -25,7 +25,7 @@
 		</div>
 		<div class="reward-toast-stack" aria-live="polite">
 			<div v-for="toast in rewardToasts" :key="toast.id" class="reward-toast">
-				{{ t('hud.combat.reward', { count: toast.amount }) }}
+				{{ toast.text }}
 			</div>
 		</div>
 		<div class="resource-panel">
@@ -770,14 +770,18 @@ function awardWood(amount: number) {
 	triggerKillPulse()
 }
 
-const rewardToasts = ref<{ id: number; amount: number }[]>([])
+const rewardToasts = ref<{ id: number; text: string }[]>([])
 let toastSeq = 0
-function showRewardToast(amount: number) {
+function showToast(text: string) {
 	const id = ++toastSeq
-	rewardToasts.value = [...rewardToasts.value, { id, amount }]
+	rewardToasts.value = [...rewardToasts.value, { id, text }]
 	setTimeout(() => {
 		rewardToasts.value = rewardToasts.value.filter(toast => toast.id !== id)
 	}, 1500)
+}
+
+function showRewardToast(amount: number) {
+	showToast(t('hud.combat.reward', { count: amount }))
 }
 
 const killsPulseKey = ref(0)
@@ -864,6 +868,7 @@ function createPlayer(targetScene: Scene) {
 		upgradeCostGrowth: WEAPON_CONFIG.upgradeCostGrowth,
 		weaponAttackPerTier: WEAPON_CONFIG.attackPerTier,
 		weaponPowerPerTier: WEAPON_CONFIG.powerPerTier,
+		reserveWood: WEAPON_CONFIG.reserveWood,
 		worldRadius: WORLD_RADIUS,
 		collisionCheck: pos => checkCollision(pos),
 		treeResources: () => treeResources,
@@ -939,12 +944,18 @@ function renderFrame() {
 	// 2. 更新玩家
 	const prevWood = playerAgent.woodCollected
 	const prevAnim = playerAgent.animation
+	const prevWeaponTier = playerAgent.weaponTier
+	const prevUpgradeCost = playerAgent.nextUpgradeCost()
 
 	playerAgent.update(delta, now)
 	syncPlayerVisuals()
 
 	if (playerAgent.woodCollected !== prevWood) {
 		woodCount.value = Math.max(0, playerAgent.woodCollected)
+	}
+	// 자동 무기 강화가 일어나면 토스트로 알린다 (나무가 말없이 사라지는 것처럼 보이지 않게)
+	if (playerAgent.weaponTier > prevWeaponTier) {
+		showToast(t('hud.combat.upgrade', { tier: playerAgent.weaponTier, count: prevUpgradeCost }))
 	}
 	choppingProgress.value = playerAgent.choppingProgress
 	attackingProgress.value = playerAgent.attackingProgress
