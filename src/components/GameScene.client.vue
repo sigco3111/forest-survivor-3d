@@ -6,6 +6,11 @@
 			<button type="button" :class="{ active: locale === 'zh-CN' }" @click="changeLocale('zh-CN')">{{ t('language.chinese') }}</button>
 			<button type="button" :class="{ active: locale === 'ko' }" @click="changeLocale('ko')">{{ t('language.korean') }}</button>
 		</div>
+		<div class="reward-toast-stack" aria-live="polite">
+			<div v-for="toast in rewardToasts" :key="toast.id" class="reward-toast">
+				{{ t('hud.combat.reward', { count: toast.amount }) }}
+			</div>
+		</div>
 		<div class="resource-panel">
 			<div class="resource-panel__day">{{ t('hud.day', { day: currentDay }) }}</div>
 			<div class="resource-panel__label">{{ t('hud.wood') }}</div>
@@ -13,7 +18,10 @@
 			<div class="resource-panel__consumption">{{ t('hud.dailyUse', { count: woodPerDay }) }}</div>
 			<div class="resource-panel__hint">{{ choppingHint }}</div>
 			<div v-if="lowWoodWarning" class="resource-panel__warning">{{ t('hud.lowWood') }}</div>
-			<div class="resource-panel__kills">{{ t('hud.combat.kills', { count: monsterKills }) }}</div>
+			<div :key="killsPulseKey" class="resource-panel__kills" :class="{ 'resource-panel__kills--pulse': killsPulsing }">
+				<span class="resource-panel__kills-label">{{ t('hud.combat.kills', { count: monsterKills }) }}</span>
+				<span v-if="isInCombat" class="resource-panel__combat-dot" :title="t('hud.combat.attacking', { progress: Math.round(attackingProgress * 100) })"></span>
+			</div>
 			<div v-if="choppingProgress > 0" class="resource-panel__progress">
 				<div
 					class="resource-panel__progress-bar"
@@ -27,11 +35,58 @@
 		<button class="minimap-toggle" @click="toggleCameraMode" :title="t(cameraMode === 'follow' ? 'camera.free' : 'camera.follow')">
 			{{ cameraMode === 'follow' ? '🔒' : '🔓' }}
 		</button>
+		<div class="player-status" aria-live="polite">
+			<div class="player-status__title">{{ t('hud.status.title') }}</div>
+			<div class="player-status__row">
+				<span class="player-status__label">{{ t('hud.status.state') }}</span>
+				<span class="player-status__value" :class="`player-status__value--${status.state}`">{{ stateLabel }}</span>
+			</div>
+			<div class="player-status__row">
+				<span class="player-status__label">{{ t('hud.status.life') }}</span>
+				<span class="player-status__value" :class="{ 'player-status__value--low': lifeRatio < 0.2 }">
+					{{ status.life }} / {{ status.lifeMax }}
+				</span>
+			</div>
+			<div class="player-status__bar">
+				<div
+					class="player-status__bar-fill"
+					:class="{ 'player-status__bar-fill--low': lifeRatio < 0.2 }"
+					:style="{ width: `${Math.round(lifeRatio * 100)}%` }"
+				></div>
+			</div>
+			<div class="player-status__row">
+				<span class="player-status__label">{{ t('hud.status.wood') }}</span>
+				<span class="player-status__value">{{ status.wood }}</span>
+			</div>
+			<div class="player-status__row">
+				<span class="player-status__label">{{ t('hud.status.attack') }}</span>
+				<span class="player-status__value">{{ status.attack }}</span>
+			</div>
+			<div class="player-status__row">
+				<span class="player-status__label">{{ t('hud.status.power') }}</span>
+				<span class="player-status__value">{{ status.power }} · {{ t('hud.status.level') }} {{ status.level }}</span>
+			</div>
+			<div class="player-status__row player-status__row--hint">
+				<span>{{ status.nextLevelWood === null ? t('hud.status.maxLevel') : t('hud.status.nextLevel', { count: status.nextLevelWood }) }}</span>
+			</div>
+			<div class="player-status__row">
+				<span class="player-status__label">{{ t('hud.status.target') }}</span>
+				<span class="player-status__value">
+					<template v-if="status.target">{{ status.target }} · {{ t(status.targetStrong ? 'hud.status.strong' : 'hud.status.weak') }}</template>
+					<template v-else>{{ t('hud.status.targetNone') }}</template>
+				</span>
+			</div>
+			<div class="player-status__row player-status__row--hint">
+				<span>{{ t('hud.status.nearby') }}: {{ t('hud.status.hostile') }} {{ status.hostileCount }} · {{ t('hud.status.preyShort') }} {{ status.preyCount }}</span>
+			</div>
+			<div class="player-status__line player-status__line--threat">{{ status.threatLine || t('hud.status.none') }}</div>
+			<div class="player-status__line player-status__line--prey">{{ status.preyLine || t('hud.status.none') }}</div>
+		</div>
 		<div v-if="gameOver" class="game-over-overlay">
 			<div class="game-over-content">
 				<h2>{{ t('gameOver.title') }}</h2>
 				<p>{{ t('gameOver.survived', { days: currentDay - 1 }) }}</p>
-				<p>{{ t('gameOver.exhausted') }}</p>
+				<p>{{ t(deathCause === 'slain' ? 'gameOver.slain' : 'gameOver.exhausted') }}</p>
 				<button class="game-over-btn" @click="restartGame">{{ t('gameOver.restart') }}</button>
 			</div>
 		</div>
@@ -68,6 +123,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { readStoredLocale, storeLocale, type AppLocale } from '~/i18n/language'
 
 import {
+	COMBAT_AGGRESSION_CONFIG,
 	DEAD_TREE_CONFIG,
 	DAY_CYCLE_CONFIG,
 	ENVIRONMENT_CONFIG,
@@ -140,6 +196,7 @@ const monsterKills = ref(0)
 const currentDay = ref(1)
 const playerAlive = ref(true)
 const gameOver = ref(false)
+const deathCause = ref<'starvation' | 'slain'>('starvation')
 const lowWoodWarning = ref(false)
 const woodPerDay = DAY_CYCLE_CONFIG.woodConsumedPerDay
 const PLAYER_ATTACK_DAMAGE = 17
@@ -152,6 +209,136 @@ const choppingHint = computed(() => {
 
 	return t('hud.approachTree')
 })
+
+const attackingProgress = ref(0)
+const isInCombat = computed(() => attackingProgress.value > 0)
+
+// ===== 플레이어 상태 창: FSM 상태/전투력/레벨/타겟/주변 위협을 매 프레임 노출 =====
+const STATUS_STATE_KEYS: Record<string, string> = {
+	exploring: 'hud.status.states.exploring',
+	approaching: 'hud.status.states.approaching',
+	chopping: 'hud.status.states.chopping',
+	fleeing: 'hud.status.states.fleeing',
+	hunting: 'hud.status.states.hunting',
+	attacking: 'hud.status.states.attacking',
+}
+
+// 레벨 기준치: 몬스터 모델별 전투력(체력/공격력 배율 → 전투력 가중치 적용)을 오름차순 정렬.
+// 플레이어 전투력이 넘는 티어 수 + 1 = 현재 레벨 (예: 고블린만 이기면 Lv2, 전부 이기면 최고 레벨)
+const LEVEL_THRESHOLDS = Array.from(new Set(
+	Object.values(MONSTER_CONFIG.strengthMultipliers ?? {}).map(multiplier =>
+		Math.round(MONSTER_CONFIG.health * multiplier) * COMBAT_AGGRESSION_CONFIG.monsterHealthPowerWeight
+		+ Math.round(MONSTER_CONFIG.attackDamage * multiplier) * COMBAT_AGGRESSION_CONFIG.monsterAttackPowerWeight
+	),
+)).sort((a, b) => a - b)
+
+type PlayerStatusSnapshot = {
+	state: string
+	life: number
+	lifeMax: number
+	wood: number
+	attack: number
+	power: number
+	level: number
+	nextLevelWood: number | null
+	target: string
+	targetStrong: boolean
+	hostileCount: number
+	preyCount: number
+	threatLine: string
+	preyLine: string
+}
+
+const status = ref<PlayerStatusSnapshot>({
+	state: 'exploring',
+	life: PLAYER_CONFIG.maxHealth,
+	lifeMax: PLAYER_CONFIG.maxHealth,
+	wood: 0,
+	attack: PLAYER_ATTACK_DAMAGE,
+	power: COMBAT_AGGRESSION_CONFIG.playerBasePower,
+	level: 1,
+	nextLevelWood: null,
+	target: '',
+	targetStrong: false,
+	hostileCount: 0,
+	preyCount: 0,
+	threatLine: '',
+	preyLine: '',
+})
+
+// 생명력 비율: 실제 HP / 최대 체력
+const lifeRatio = computed(() => Math.min(1, status.value.life / status.value.lifeMax))
+
+const stateLabel = computed(() => t(STATUS_STATE_KEYS[status.value.state] ?? 'hud.status.states.exploring'))
+
+// 에이전트 내부 판정과 동일한 전투력 공식 (진단용 미러링)
+function monsterStrengthOf(resource: MonsterResource): number {
+	return resource.health * COMBAT_AGGRESSION_CONFIG.monsterHealthPowerWeight
+		+ resource.attackDamage * COMBAT_AGGRESSION_CONFIG.monsterAttackPowerWeight
+}
+
+function updatePlayerStatus() {
+	if (!playerAgent) return
+	const agent = playerAgent
+	const power = COMBAT_AGGRESSION_CONFIG.playerBasePower
+		+ agent.woodCollected * COMBAT_AGGRESSION_CONFIG.powerPerWood
+	const level = LEVEL_THRESHOLDS.filter(threshold => threshold < power).length + 1
+	const nextThreshold = level - 1 < LEVEL_THRESHOLDS.length ? LEVEL_THRESHOLDS[level - 1] : null
+	// power > threshold 가 되는 최소 나무 수
+	const nextLevelWood = nextThreshold === null
+		? null
+		: Math.max(1, Math.floor(nextThreshold - power) + 1)
+
+	const [px, pz] = agent.position
+	const live = monsterAgents.filter(candidate => candidate.resource.health > 0)
+	const infos = live.map(candidate => ({
+		resource: candidate.resource,
+		strength: Math.round(monsterStrengthOf(candidate.resource)),
+		weaker: monsterStrengthOf(candidate.resource) < power,
+		hostile: candidate.state === 'chase' || candidate.state === 'attack' || candidate.state === 'hit',
+		distance: Math.round(Math.hypot(candidate.position[0] - px, candidate.position[1] - pz)),
+		contained: Math.hypot(candidate.resource.homePosition[0] - px, candidate.resource.homePosition[1] - pz)
+			<= candidate.resource.activityRadius,
+	}))
+
+	const hostiles = infos.filter(info => info.hostile)
+	const prey = infos.filter(info =>
+		info.weaker
+		&& info.contained
+		&& info.distance <= PLAYER_CONFIG.attackRangeMeters * COMBAT_AGGRESSION_CONFIG.huntAggroRangeMultiplier
+	)
+	const strongest = hostiles
+		.filter(info => !info.weaker && info.contained)
+		.sort((a, b) => a.distance - b.distance)[0] ?? null
+	const nearestPrey = [...prey].sort((a, b) => a.distance - b.distance)[0] ?? null
+
+	const targetResource = agent.attackTarget
+		? live.find(candidate => candidate.resource.id === agent.attackTarget?.id)?.resource ?? null
+		: null
+
+	status.value = {
+		state: agent.state,
+		life: Math.max(0, agent.health),
+		lifeMax: agent.maxHealth,
+		wood: Math.max(0, agent.woodCollected),
+		attack: PLAYER_ATTACK_DAMAGE,
+		power: Math.round(power),
+		level,
+		nextLevelWood,
+		target: targetResource
+			? `${targetResource.modelName} (${targetResource.health}/${targetResource.maxHealth})`
+			: '',
+		targetStrong: targetResource ? monsterStrengthOf(targetResource) >= power : false,
+		hostileCount: hostiles.length,
+		preyCount: prey.length,
+		threatLine: strongest
+			? t('hud.status.threatLine', { model: strongest.resource.modelName, power: strongest.strength, distance: strongest.distance })
+			: '',
+		preyLine: nearestPrey
+			? t('hud.status.preyLine', { model: nearestPrey.resource.modelName, power: nearestPrey.strength, distance: nearestPrey.distance })
+			: '',
+	}
+}
 
 let animationFrame = 0
 let clock: Clock | null = null
@@ -428,7 +615,7 @@ function plantTreeAtPosition(position: PlanePoint) {
 	spawnTreeVisual(newTree)
 }
 
-// 玩家攻击怪物回调：减少怪物的 health，归零则计入击杀并从场景中移除
+// 玩家攻击怪物回调：减少怪物的 health，归零则计入击杀并从场景中移除，结算 wood 报酬
 function handlePlayerAttack(monsterId: string, damage: number) {
 	const index = monsterAgents.findIndex(agent => agent.resource.id === monsterId)
 	if (index < 0) return
@@ -436,8 +623,44 @@ function handlePlayerAttack(monsterId: string, damage: number) {
 	agent.resource.health -= damage
 	if (agent.resource.health <= 0) {
 		monsterKills.value += 1
+		const reward = Math.max(1, Math.round(agent.resource.maxHealth * 0.3))
+		awardWood(reward)
+		// 처치 보상으로 체력 회복: 공격적인 사냥이 생존 전략이 되도록
+		playerAgent?.applyKillHeal()
 		disposeMonster(monsterId)
 	}
+}
+
+// 结算 wood 报酬并刷新 HUD + 토스트 알림
+function awardWood(amount: number) {
+	if (!playerAgent) return
+	playerAgent.woodCollected += amount
+	woodCount.value = Math.max(0, playerAgent.woodCollected)
+	showRewardToast(amount)
+	triggerKillPulse()
+}
+
+const rewardToasts = ref<{ id: number; amount: number }[]>([])
+let toastSeq = 0
+function showRewardToast(amount: number) {
+	const id = ++toastSeq
+	rewardToasts.value = [...rewardToasts.value, { id, amount }]
+	setTimeout(() => {
+		rewardToasts.value = rewardToasts.value.filter(toast => toast.id !== id)
+	}, 1500)
+}
+
+const killsPulseKey = ref(0)
+const killsPulsing = ref(false)
+let killsPulseTimer: ReturnType<typeof setTimeout> | null = null
+function triggerKillPulse() {
+	killsPulseKey.value += 1
+	// 펄스는 일시적으로만: 상시 scale(1.18)이면 행이 좌우로 부풀어 다른 줄과 어긋난다
+	killsPulsing.value = true
+	if (killsPulseTimer) clearTimeout(killsPulseTimer)
+	killsPulseTimer = setTimeout(() => {
+		killsPulsing.value = false
+	}, 700)
 }
 
 // 从场景、动画控制器、Agent 列表中移除死亡怪物并释放资源
@@ -495,11 +718,22 @@ function createPlayer(targetScene: Scene) {
 		attackCooldownMs: PLAYER_CONFIG.attackCooldownMs,
 		playerAttackDamage: PLAYER_ATTACK_DAMAGE,
 		onAttackMonster: (monsterId, damage) => handlePlayerAttack(monsterId, damage),
+		playerMaxHealth: PLAYER_CONFIG.maxHealth,
+		killHealHealth: PLAYER_CONFIG.killHealHealth,
+		playerBasePower: COMBAT_AGGRESSION_CONFIG.playerBasePower,
+		powerPerWood: COMBAT_AGGRESSION_CONFIG.powerPerWood,
+		monsterHealthPowerWeight: COMBAT_AGGRESSION_CONFIG.monsterHealthPowerWeight,
+		monsterAttackPowerWeight: COMBAT_AGGRESSION_CONFIG.monsterAttackPowerWeight,
+		huntAggroRangeMultiplier: COMBAT_AGGRESSION_CONFIG.huntAggroRangeMultiplier,
+		huntGiveUpRangeMultiplier: COMBAT_AGGRESSION_CONFIG.huntGiveUpRangeMultiplier,
 		worldRadius: WORLD_RADIUS,
 		collisionCheck: pos => checkCollision(pos),
 		treeResources: () => treeResources,
+		// 살아있는 모든 몬스터를 후보로 노출한다:
+		// - hostile=true(chase/attack/hit)인 몬스터만 도망 판정 대상
+		// - 나머지(idle/patrol/tendPlants)는 "나보다 약하면" 선제공격 사냥감이 된다
 		threatSources: () => monsterAgents
-			.filter(agent => agent.state === 'chase' || agent.state === 'attack' || agent.state === 'hit')
+			.filter(agent => agent.resource.health > 0)
 			.map(agent => ({
 				id: agent.resource.id,
 				position: agent.position,
@@ -507,7 +741,9 @@ function createPlayer(targetScene: Scene) {
 				activityRadius: agent.resource.activityRadius,
 				speed: agent.resource.speed,
 				attackRadius: MONSTER_CONFIG.attackRadius,
-				attackDamage: MONSTER_CONFIG.attackDamage,
+				attackDamage: agent.resource.attackDamage,
+				health: agent.resource.health,
+				hostile: agent.state === 'chase' || agent.state === 'attack' || agent.state === 'hit',
 			})),
 	})
 
@@ -549,6 +785,7 @@ function renderFrame() {
 		if (playerAgent.woodCollected <= 0) {
 			playerAgent.playerAlive = false
 			playerAlive.value = false
+			deathCause.value = 'starvation'
 			gameOver.value = true
 		}
 	}
@@ -572,6 +809,8 @@ function renderFrame() {
 		woodCount.value = Math.max(0, playerAgent.woodCollected)
 	}
 	choppingProgress.value = playerAgent.choppingProgress
+	attackingProgress.value = playerAgent.attackingProgress
+	updatePlayerStatus()
 	if (playerAgent.lastCollectedTree) {
 		replaceTreeWithDeadModel(playerAgent.lastCollectedTree)
 		playerAgent.lastCollectedTree = null
@@ -603,17 +842,20 @@ function updateMonsters(delta: number, now: number) {
 	const monsterContext: MonsterUpdateContext = {
 		playerPosition: playerAgent.position,
 		playerAlive: playerAgent.playerAlive,
-		playerIsChopping: playerAgent.state === 'chopping' || playerAgent.state === 'attacking',
+		// 사냥(hunting)/공격(attacking) 중에도 "벌목 중"처럼 취급해 몬스터가 반격한다:
+		// 선제공격을 당한 몬스터가 도망치지 않고 되받아치므로 전투가 성립한다.
+		playerIsChopping: playerAgent.state === 'chopping'
+			|| playerAgent.state === 'attacking'
+			|| playerAgent.state === 'hunting',
 		playerIsFleeing: playerAgent.state === 'fleeing',
 		playerAttackRange: PLAYER_CONFIG.attackRangeMeters,
 		playerAttackDamage: PLAYER_ATTACK_DAMAGE,
 		onAttackPlayer: () => {
-			// 怪物攻击：偷走玩家的木头
+			// 몬스터 공격: 나무 대신 체력을 깎는다 (HP 0 = 사망)
 			if (!playerAgent) return
-			playerAgent.woodCollected -= MONSTER_CONFIG.attackDamage
-			woodCount.value = Math.max(0, playerAgent.woodCollected)
-			if (playerAgent.woodCollected <= 0) {
-				playerAgent.playerAlive = false
+			playerAgent.applyDamage(MONSTER_CONFIG.attackDamage)
+			if (!playerAgent.playerAlive) {
+				deathCause.value = 'slain'
 				playerAlive.value = false
 				gameOver.value = true
 			}
@@ -891,6 +1133,7 @@ function restartGame() {
 	currentDay.value = 1
 	playerAlive.value = true
 	gameOver.value = false
+	deathCause.value = 'starvation'
 	lowWoodWarning.value = false
 
 	createScene()
@@ -1065,12 +1308,107 @@ function disposeScene() {
 }
 
 .resource-panel__kills {
-	margin-top: 6px;
+	margin-top: 8px;
 	font-size: 12px;
-	font-weight: 600;
-	opacity: 0.85;
+	letter-spacing: 0.08em;
+	opacity: 0.72;
 	color: #ff8c00;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	transition: color 0.18s ease-out, text-shadow 0.18s ease-out;
+}
+
+.resource-panel__kills--pulse {
+	transform-origin: left center;
+	animation: kills-pulse 0.7s ease-out;
+}
+
+@keyframes kills-pulse {
+	0% {
+		transform: scale(1);
+		color: #ff8c00;
+		text-shadow: none;
+	}
+	35% {
+		transform: scale(1.18);
+		color: #ffd166;
+		text-shadow: 0 0 12px rgba(255, 209, 102, 0.75);
+	}
+	100% {
+		transform: scale(1);
+		color: #ff8c00;
+		text-shadow: none;
+	}
+}
+
+.resource-panel__kills-label {
+	display: inline-block;
+}
+
+.resource-panel__combat-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: #ff4d4d;
+	box-shadow: 0 0 8px rgba(255, 77, 77, 0.85);
+	animation: combat-dot-pulse 0.8s ease-in-out infinite;
+}
+
+.reward-toast-stack {
+	position: absolute;
+	top: 90px;
+	left: 50%;
+	z-index: 6;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 6px;
+	pointer-events: none;
+	transform: translateX(-50%);
+}
+
+.reward-toast {
+	padding: 8px 16px;
+	border-radius: 999px;
+	background: rgba(255, 209, 102, 0.95);
+	color: #1a1a1a;
+	font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	font-size: 14px;
+	font-weight: 700;
 	letter-spacing: 0.02em;
+	box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+	animation: reward-toast-rise 1.5s ease-out forwards;
+}
+
+@keyframes reward-toast-rise {
+	0% {
+		opacity: 0;
+		transform: translateY(12px) scale(0.92);
+	}
+	15% {
+		opacity: 1;
+		transform: translateY(0) scale(1.05);
+	}
+	35% {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+	100% {
+		opacity: 0;
+		transform: translateY(-18px) scale(1);
+	}
+}
+
+@keyframes combat-dot-pulse {
+	0%, 100% {
+		transform: scale(1);
+		opacity: 1;
+	}
+	50% {
+		transform: scale(1.4);
+		opacity: 0.55;
+	}
 }
 
 .resource-panel__progress {
@@ -1109,6 +1447,113 @@ function disposeScene() {
 	display: block;
 	width: 100%;
 	height: 100%;
+}
+
+.player-status {
+	position: absolute;
+	/* 미니맵(20px + 180px = 200px) 아래 32px 간격 */
+	top: 232px;
+	left: 20px;
+	z-index: 2;
+	width: 180px;
+	padding: 10px 12px;
+	border: 1px solid rgba(53, 244, 255, 0.38);
+	border-radius: 12px;
+	background: rgba(3, 12, 24, 0.72);
+	box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), inset 0 0 16px rgba(53, 244, 255, 0.08);
+	color: #dffcff;
+	font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	backdrop-filter: blur(12px);
+}
+
+.player-status__title {
+	margin-bottom: 6px;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.06em;
+	color: #ffc857;
+	text-shadow: 0 0 12px rgba(255, 200, 87, 0.4);
+}
+
+.player-status__row {
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+	justify-content: space-between;
+	font-size: 11px;
+	line-height: 1.55;
+}
+
+.player-status__label {
+	white-space: nowrap;
+	letter-spacing: 0.04em;
+	opacity: 0.6;
+}
+
+.player-status__value {
+	font-weight: 600;
+	text-align: right;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.player-status__value--fleeing {
+	color: #ff6b6b;
+}
+
+.player-status__value--low {
+	color: #ff6b6b;
+}
+
+.player-status__bar {
+	height: 6px;
+	margin-top: 4px;
+	overflow: hidden;
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.14);
+}
+
+.player-status__bar-fill {
+	height: 100%;
+	border-radius: inherit;
+	background: linear-gradient(90deg, #ff8c00, #ffd166);
+	box-shadow: 0 0 12px rgba(255, 200, 87, 0.5);
+	transition: width 0.15s linear;
+}
+
+.player-status__bar-fill--low {
+	background: linear-gradient(90deg, #ff4444, #ff6b6b);
+	box-shadow: 0 0 12px rgba(255, 68, 68, 0.6);
+	animation: warning-pulse 1s ease-in-out infinite;
+}
+
+.player-status__value--hunting,
+.player-status__value--attacking {
+	color: #ffd166;
+}
+
+.player-status__row--hint {
+	justify-content: flex-start;
+	font-size: 10px;
+	opacity: 0.55;
+}
+
+.player-status__line {
+	font-size: 10px;
+	line-height: 1.5;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	opacity: 0.85;
+}
+
+.player-status__line--threat {
+	color: #ff8c87;
+}
+
+.player-status__line--prey {
+	color: #7dffa8;
 }
 
 .minimap-toggle {

@@ -5,7 +5,7 @@ import {
 	type TreeResource,
 } from '../resources/trees'
 
-export type PlayerAgentState = 'exploring' | 'approaching' | 'chopping' | 'fleeing' | 'attacking'
+export type PlayerAgentState = 'exploring' | 'approaching' | 'chopping' | 'fleeing' | 'attacking' | 'hunting'
 
 export type PlayerThreatSource = {
 	id?: string
@@ -15,6 +15,10 @@ export type PlayerThreatSource = {
 	speed: number
 	attackRadius: number
 	attackDamage?: number
+	/** 현재 체력. 정보가 없으면 항상 강한 적(전투력 ∞)으로 취급한다. */
+	health?: number
+	/** 플레이어를 추격/공격 중인지. false면 도망 판정 대상에서 제외되지만 사냥감은 될 수 있다. */
+	hostile?: boolean
 }
 
 type AvoidedArea = {
@@ -40,6 +44,14 @@ export type PlayerAgentConfig = {
 	attackCooldownMs: number      // 攻击之间的冷却（毫秒）
 	playerAttackDamage: number    // 单次攻击伤害
 	onAttackMonster?: (monsterId: string, damage: number) => void
+	playerMaxHealth: number           // 플레이어 최대 체력
+	killHealHealth: number            // 몬스터 처치 시 체력 회복량
+	playerBasePower: number           // 플레이어 기본 전투력
+	powerPerWood: number              // 나무 1개당 전투력 증가량
+	monsterHealthPowerWeight: number  // 몬스터 체력 → 위협 전투력 가중치
+	monsterAttackPowerWeight: number  // 몬스터 공격력 → 위협 전투력 가중치
+	huntAggroRangeMultiplier: number  // 선제공격 스캔 범위 배율 (attackRangeMeters × 배율)
+	huntGiveUpRangeMultiplier: number // 추격 포기 범위 배율 (attackRangeMeters × 배율)
 	worldRadius: number           // 世界半径
 	collisionCheck: (position: PlanePoint) => boolean
 	treeResources: () => TreeResource[]
@@ -55,6 +67,8 @@ export type PlayerAgent = {
 	attackingProgress: number
 	activeTree: TreeResource | null
 	woodCollected: number
+	health: number
+	maxHealth: number
 	animation: 'walk' | 'interact' | 'attack' | null
 	lastCollectedTree: TreeResource | null
 	attackTarget: PlayerThreatSource | null
@@ -63,6 +77,10 @@ export type PlayerAgent = {
 	failedAreaAttempt: FailedAreaAttempt | null
 
 	update(delta: number, now: number): void
+	/** 피해를 입힌다. 체력이 0이 되면 playerAlive = false (사망). */
+	applyDamage(amount: number): void
+	/** 몬스터 처치 보상으로 체력을 회복한다(최대치까지). */
+	applyKillHeal(): void
 }
 
 const AREA_FAILURE_LIMIT = 2
@@ -85,6 +103,8 @@ export function createPlayerAgent(
 		attackingProgress: 0,
 		activeTree: null,
 		woodCollected: 0,
+		health: config.playerMaxHealth,
+		maxHealth: config.playerMaxHealth,
 		animation: 'walk',
 		lastCollectedTree: null,
 		attackTarget: null,
@@ -92,21 +112,24 @@ export function createPlayerAgent(
 		avoidedAreas: [],
 		failedAreaAttempt: null,
 
+		applyDamage(amount: number) {
+			this.health = Math.max(0, this.health - amount)
+			if (this.health <= 0) this.playerAlive = false
+		},
+
+		applyKillHeal() {
+			this.health = Math.min(this.maxHealth, this.health + config.killHealHealth)
+		},
+
 		update(delta, now) {
 			if (!this.playerAlive) return
 			pruneAvoidedAreas(this, now)
 
-			if (this.state !== 'attacking' && this.state !== 'fleeing') {
-				const threat = findActiveThreat(this.position, config)
-				if (threat && shouldFleeThreat(this, now, threat, config)) {
-					registerFailedAreaAttempt(this, threat, now)
-					startFleeing(this, threat, config, now)
-				} else {
-					const attackTarget = findNearbyAttackTarget(this, config)
-					if (attackTarget) {
-						startAttacking(this, attackTarget, now, config)
-					}
-				}
+			// 공격 중이 아니면 매 프레임 전투 의사를 다시 판단한다:
+			// 1) 이길 수 없는 적이 쫓아오면 도망 (또는 이미 붙었으면 맞서싸움)
+			// 2) 그 외에는 나보다 약한 적을 발견하는 즉시 먼저 추격/공격한다 (선제공격)
+			if (this.state !== 'attacking') {
+				resolveCombatIntent(this, now, config)
 			}
 
 			switch (this.state) {
@@ -122,11 +145,57 @@ export function createPlayerAgent(
 				case 'fleeing':
 					updateFleeing(this, delta, config)
 					break
+				case 'hunting':
+					updateHunting(this, delta, now, config)
+					break
 				case 'attacking':
 					updateAttacking(this, now, config)
 					break
 			}
 		},
+	}
+}
+
+// ===== 전투 의사 결정: 강한 적 회피 → 약한 적 선제공격 =====
+function resolveCombatIntent(agent: PlayerAgent, now: number, config: PlayerAgentConfig) {
+	const hostiles = config.threatSources().filter(isHostileThreat)
+	const strongThreat = findNearestStrongThreat(agent, hostiles, config)
+
+	if (strongThreat) {
+		const distanceToThreat = distanceTo(agent.position, strongThreat.position)
+
+		if (agent.state !== 'fleeing' && shouldFleeThreat(agent, now, strongThreat, config)) {
+			registerFailedAreaAttempt(agent, strongThreat, now)
+			startFleeing(agent, strongThreat, config, now)
+			return
+		}
+
+		// 이길 수 없는 적이 바로 옆까지 붙었다면 도망 대신 맞서싸운다
+		if (distanceToThreat <= Math.max(config.attackRangeMeters, strongThreat.attackRadius)) {
+			engageTarget(agent, strongThreat, now, config)
+			return
+		}
+		// 멀리 있는 강한 적에게서 도망 중이라면 도망을 지속한다 (updateFleeing 담당)
+	}
+
+	// 도망할 이유가 없으면 가장 가까운 "약한 적"을 먼저 찾아 들어간다
+	const prey = findPreyTarget(agent, config)
+	if (prey) {
+		engageTarget(agent, prey, now, config)
+	}
+}
+
+function engageTarget(
+	agent: PlayerAgent,
+	threat: PlayerThreatSource,
+	now: number,
+	config: PlayerAgentConfig,
+) {
+	const distance = distanceTo(agent.position, threat.position)
+	if (distance <= config.attackRangeMeters) {
+		startAttacking(agent, threat, now, config)
+	} else {
+		startHunting(agent, threat, config)
 	}
 }
 
@@ -208,16 +277,23 @@ function updateChopping(agent: PlayerAgent, now: number, config: PlayerAgentConf
 
 // ===== 攻击：对怪物挥砍，按 cooldown 节奏 =====
 function updateAttacking(agent: PlayerAgent, now: number, config: PlayerAgentConfig) {
-	if (!agent.attackTarget) {
-		exitAttacking(agent, config)
+	// 대상 유효성 확인: 같은 id(또는 동일 객체)의 위협이 살아있는가
+	const liveTarget = findLiveTarget(agent, config)
+	if (!liveTarget || isDeadThreat(liveTarget)) {
+		exitCombat(agent, config)
 		return
 	}
 
-	// 检测当前攻击目标是否仍然有效：同 id의 위협이 attackRange 안에 있는가
-	const liveTargets = config.threatSources().filter(threat => threat.id === agent.attackTarget!.id)
-	const liveTarget = liveTargets[0]
-	if (!liveTarget || distanceTo(agent.position, liveTarget.position) > config.attackRangeMeters) {
-		exitAttacking(agent, config)
+	const distance = distanceTo(agent.position, liveTarget.position)
+
+	if (distance > config.attackRangeMeters) {
+		// 사거리에서 이탈: 아직 약하고 포기 반경 안이면 추격(hunting)으로 갈아타고, 아니면 전투 종료
+		const giveUpRange = config.attackRangeMeters * config.huntGiveUpRangeMultiplier
+		if (distance <= giveUpRange && isThreatWeakerThanPlayer(agent, liveTarget, config)) {
+			startHunting(agent, liveTarget, config)
+		} else {
+			exitCombat(agent, config)
+		}
 		return
 	}
 
@@ -240,6 +316,62 @@ function updateAttacking(agent: PlayerAgent, now: number, config: PlayerAgentCon
 	agent.animation = 'attack'
 }
 
+// ===== 사냥：표적을 향해 이동하고 사거리에 들어오면 공격으로 전환 =====
+function updateHunting(
+	agent: PlayerAgent,
+	delta: number,
+	now: number,
+	config: PlayerAgentConfig,
+) {
+	const liveTarget = findLiveTarget(agent, config)
+	if (!liveTarget || isDeadThreat(liveTarget)) {
+		exitCombat(agent, config)
+		return
+	}
+
+	const distance = distanceTo(agent.position, liveTarget.position)
+	const giveUpRange = config.attackRangeMeters * config.huntGiveUpRangeMultiplier
+
+	if (distance > giveUpRange) {
+		exitCombat(agent, config)
+		return
+	}
+
+	if (distance <= config.attackRangeMeters) {
+		startAttacking(agent, liveTarget, now, config)
+		return
+	}
+
+	agent.target = [...liveTarget.position]
+	moveToward(agent, delta, config)
+	agent.bearing = faceTarget(agent, agent.target)
+	agent.animation = 'walk'
+}
+
+function findLiveTarget(agent: PlayerAgent, config: PlayerAgentConfig): PlayerThreatSource | null {
+	const target = agent.attackTarget
+	if (!target) return null
+
+	return config.threatSources().find(threat =>
+		threat.id !== undefined ? threat.id === target.id : threat === target
+	) ?? null
+}
+
+function isDeadThreat(threat: PlayerThreatSource): boolean {
+	return threat.health !== undefined && threat.health <= 0
+}
+
+function startHunting(agent: PlayerAgent, threat: PlayerThreatSource, config: PlayerAgentConfig) {
+	agent.state = 'hunting'
+	agent.activeTree = null
+	agent.choppingProgress = 0
+	agent.attackTarget = threat
+	agent.attackingProgress = 0
+	agent.animation = 'walk'
+	agent.target = [...threat.position]
+	agent.bearing = faceTarget(agent, agent.target)
+}
+
 function startAttacking(agent: PlayerAgent, threat: PlayerThreatSource, now: number, config: PlayerAgentConfig) {
 	agent.state = 'attacking'
 	agent.activeTree = null
@@ -251,7 +383,7 @@ function startAttacking(agent: PlayerAgent, threat: PlayerThreatSource, now: num
 	agent.target = [...threat.position]
 }
 
-function exitAttacking(agent: PlayerAgent, config: PlayerAgentConfig) {
+function exitCombat(agent: PlayerAgent, config: PlayerAgentConfig) {
 	agent.state = 'exploring'
 	agent.attackTarget = null
 	agent.attackingProgress = 0
@@ -409,10 +541,12 @@ function computeFleeDecision(
 	config: PlayerAgentConfig,
 	distanceToThreat: number,
 ): boolean {
+	// 이미 근접전 거리면 버티고 싸운다
 	if (isThreatAtMeleeRange(distanceToThreat, threat.attackRadius)) return false
-	// 플레이어 공격 범위 밖이면 남은 로직 검토
-	if (distanceToThreat > config.attackRangeMeters && mustFlee(agent, threat)) return true
-	if (distanceToThreat > config.attackRangeMeters && agent.state === 'chopping') {
+	// 플레이어 공격 사거리 안이면 맞서싸움 (도망 아님)
+	if (distanceToThreat <= config.attackRangeMeters) return false
+	// 벌목 중에는 이길 수 없는 적에 한해 "벌목을 끝내고 도망칠 시간이 되는지" 실시간 비교한다
+	if (agent.state === 'chopping' && !isThreatWeakerThanPlayer(agent, threat, config)) {
 		const remainingChopMs = Math.max(0, config.chopDurationMs - (now - lastTreeScan))
 		const distanceBeforeHit = Math.max(0, distanceToThreat - threat.attackRadius)
 		const timeUntilHitMs = (distanceBeforeHit / Math.max(threat.speed, 1)) * 1000
@@ -421,7 +555,8 @@ function computeFleeDecision(
 
 		return remainingChopMs + timeToEscapeMs > timeUntilHitMs
 	}
-	return false
+	// 사거리 밖의 강한 적은 즉시 도망. 약한 적은 여기서 도망하지 않는다(선제공격은 의사결정 단계 담당)
+	return !isThreatWeakerThanPlayer(agent, threat, config)
 }
 
 export function isThreatAtMeleeRange(distanceToThreat: number, threatAttackRadius: number): boolean {
@@ -438,24 +573,54 @@ export function isOutsidePlayerAttackRange(distanceToThreat: number, playerAttac
 	return false
 }
 
-export function canWinAgainstThreat(agent: PlayerAgent, threat: PlayerThreatSource): boolean {
-	if (agent.woodCollected > 0) return true
-	return false
+// ===== 전투력 비교: 나보다 약한 적인가? =====
+export function computePlayerPower(agent: PlayerAgent, config: PlayerAgentConfig): number {
+	return config.playerBasePower + agent.woodCollected * config.powerPerWood
 }
 
-export function mustFlee(agent: PlayerAgent, threat: PlayerThreatSource): boolean {
-	if (canWinAgainstThreat(agent, threat)) return false
-	return true
+export function computeThreatStrength(threat: PlayerThreatSource, config: PlayerAgentConfig): number {
+	const health = threat.health
+	// 체력 정보가 없으면 알 수 없는 위협 → 항상 강한 것으로 취급
+	if (health === undefined) return Number.POSITIVE_INFINITY
+	return health * config.monsterHealthPowerWeight + (threat.attackDamage ?? 0) * config.monsterAttackPowerWeight
 }
 
-export function findNearbyAttackTarget(agent: PlayerAgent, config: PlayerAgentConfig): PlayerThreatSource | null {
+export function isThreatWeakerThanPlayer(
+	agent: PlayerAgent,
+	threat: PlayerThreatSource,
+	config: PlayerAgentConfig,
+): boolean {
+	return computeThreatStrength(threat, config) < computePlayerPower(agent, config)
+}
+
+export function canWinAgainstThreat(
+	agent: PlayerAgent,
+	threat: PlayerThreatSource,
+	config: PlayerAgentConfig,
+): boolean {
+	return isThreatWeakerThanPlayer(agent, threat, config)
+}
+
+export function mustFlee(
+	agent: PlayerAgent,
+	threat: PlayerThreatSource,
+	config: PlayerAgentConfig,
+): boolean {
+	return !canWinAgainstThreat(agent, threat, config)
+}
+
+// ===== 사냥감 탐색: 활동 반경 안에서 "나보다 약한" 가장 가까운 적 =====
+export function findPreyTarget(agent: PlayerAgent, config: PlayerAgentConfig): PlayerThreatSource | null {
+	const scanRange = config.attackRangeMeters * config.huntAggroRangeMultiplier
 	let nearest: PlayerThreatSource | null = null
 	let nearestDistance = Number.POSITIVE_INFINITY
 	for (const threat of config.threatSources()) {
+		if (isDeadThreat(threat)) continue
+		if (!isThreatWeakerThanPlayer(agent, threat, config)) continue
 		const distanceFromHome = distanceTo(agent.position, threat.homePosition)
 		if (distanceFromHome > threat.activityRadius) continue
 		const distanceFromThreat = distanceTo(agent.position, threat.position)
-		if (distanceFromThreat > config.attackRangeMeters) continue
+		if (distanceFromThreat > scanRange) continue
 		if (isCloserThreat(distanceFromThreat, nearestDistance)) {
 			nearest = threat
 			nearestDistance = distanceFromThreat
@@ -469,11 +634,37 @@ function isCloserThreat(distanceFromThreat: number, nearestDistance: number): bo
 	return false
 }
 
+/** 추격/공격 중인(플레이어에게 적대적인) 위협인지. 기본값은 true. */
+export function isHostileThreat(threat: PlayerThreatSource): boolean {
+	return threat.hostile !== false
+}
+
+function findNearestStrongThreat(
+	agent: PlayerAgent,
+	hostiles: PlayerThreatSource[],
+	config: PlayerAgentConfig,
+): PlayerThreatSource | null {
+	let nearest: PlayerThreatSource | null = null
+	let nearestDistance = Number.POSITIVE_INFINITY
+	for (const threat of hostiles) {
+		const distanceFromHome = distanceTo(agent.position, threat.homePosition)
+		if (distanceFromHome > threat.activityRadius) continue
+		if (isThreatWeakerThanPlayer(agent, threat, config)) continue
+		const distanceFromThreat = distanceTo(agent.position, threat.position)
+		if (isCloserThreat(distanceFromThreat, nearestDistance)) {
+			nearest = threat
+			nearestDistance = distanceFromThreat
+		}
+	}
+	return nearest
+}
+
 function findActiveThreat(position: PlanePoint, config: PlayerAgentConfig): PlayerThreatSource | null {
 	let nearestThreat: PlayerThreatSource | null = null
 	let nearestDistance = Number.POSITIVE_INFINITY
 
 	for (const threat of config.threatSources()) {
+		if (!isHostileThreat(threat)) continue
 		const distanceFromHome = distanceTo(position, threat.homePosition)
 		if (distanceFromHome > threat.activityRadius) continue
 

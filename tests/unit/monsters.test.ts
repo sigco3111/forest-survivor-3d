@@ -91,6 +91,42 @@ describe('monster resources', () => {
 
     expect(resources.some(resource => resource.modelIndex === 6 && resource.modelName === 'Demon')).toBe(true)
   })
+
+  it('applies strength multipliers per model name and defaults to 1 for unknown models', () => {
+    const config = {
+      modelUrls: Array.from({ length: 7 }, (_, index) => `/${index}.glb`),
+      seed: 1,
+      count: 100,
+      radiusMeters: 100,
+      scaleRange: [1, 1] as [number, number],
+      patrolRadius: 10,
+      speed: 10,
+      detectionRadius: 20,
+      attackRadius: 5,
+      health: 100,
+      attackDamage: 10,
+      attackCooldownMs: 100,
+      activityRadius: 30,
+      modelScale: 1,
+      hitStunMs: 700,
+      // Goblin만 약하게, Demon은 강하게. 미등록 모델(Demon 제외 나머지)은 배율 1.
+      strengthMultipliers: { Goblin: 0.5, Giant: 2 } as Record<string, number>,
+    }
+
+    const resources = createMonsterResources(config)
+    const expectedHealth = (modelName: string) => Math.round(100 * (config.strengthMultipliers[modelName] ?? 1))
+    const expectedDamage = (modelName: string) => Math.round(10 * (config.strengthMultipliers[modelName] ?? 1))
+
+    expect(resources.every(resource => resource.health === expectedHealth(resource.modelName))).toBe(true)
+    expect(resources.every(resource => resource.maxHealth === expectedHealth(resource.modelName))).toBe(true)
+    expect(resources.every(resource => resource.attackDamage === expectedDamage(resource.modelName))).toBe(true)
+
+    // 실제로 약한/강한 개체가 섞여 있는지 확인 (seed=1은 100마리 전 모델 인덱스를 사용)
+    expect(resources.some(resource => resource.modelName === 'Goblin' && resource.health === 50)).toBe(true)
+    expect(resources.some(resource => resource.modelName === 'Giant' && resource.attackDamage === 20)).toBe(true)
+    // 결정론성 유지
+    expect(resources).toEqual(createMonsterResources(config))
+  })
 })
 
 describe('monster agent', () => {

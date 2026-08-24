@@ -10,6 +10,8 @@ export const PLAYER_CONFIG = {
   attackRangeMeters: 20, // 玩家攻击怪物的距离
   attackDamageMs: 600, // 攻击挥砍动画耗时（毫秒）
   attackCooldownMs: 1500, // 攻击之间的冷却时间（毫秒）
+  maxHealth: 100, // 플레이어 최대 체력. 몬스터 공격 = HP 데미지, HP 0 = 사망
+  killHealHealth: 15, // 몬스터 처치 시 체력 회복량 (적극적인 전투가 생존 전략이 되도록)
 };
 
 // 树资源配置：使用确定性噪声生成，采集后枯树淡出并在随机位置重生。
@@ -57,6 +59,19 @@ export const DAY_CYCLE_CONFIG = {
   woodConsumedPerDay: 5,       // 每天消耗 5 木头
 }
 
+// 전투 성향 설정: 플레이어가 자신보다 약한 적을 선제공격하는 호전성 튜닝.
+// 전투력 비교: playerPower = playerBasePower + wood × powerPerWood
+//             threatStrength = health × monsterHealthPowerWeight + attackDamage × monsterAttackPowerWeight
+// threatStrength < playerPower 인 적을 "약한 적"으로 간주하고 먼저 추격/공격한다.
+export const COMBAT_AGGRESSION_CONFIG = {
+  playerBasePower: 40,            // 플레이어 기본 전투력
+  powerPerWood: 1,                // 나무 1개당 전투력 증가량
+  monsterHealthPowerWeight: 0.35, // 몬스터 체력 → 위협 전투력 가중치
+  monsterAttackPowerWeight: 1.5,  // 몬스터 공격력 → 위협 전투력 가중치
+  huntAggroRangeMultiplier: 4,    // 선제공격 스캔 범위 = attackRangeMeters × 4 = 80
+  huntGiveUpRangeMultiplier: 6,   // 추격 포기 범위 = attackRangeMeters × 6 = 120
+};
+
 // 怪物看管植物配置
 export const MONSTER_GUARDIAN_CONFIG = {
   guardianDetectionRadius: 135,  // 玩家砍树时怪物的警觉范围
@@ -89,4 +104,14 @@ export const MONSTER_CONFIG = {
   attackDamage: 10,
   attackCooldownMs: 1500,
   hitStunMs: 700, // 怪物被玩家击中后的硬直时间（毫秒）
+  // 모델별 강도 배율: 체력/공격력에 곱해져 약한 적(고블린)과 강한 적(거인)이 섞인다.
+  // 미등록 모델은 배율 1.0 적용. seed 기반 생성이므로 여전히 결정론적.
+  strengthMultipliers: {
+    Goblin: 0.65,
+    Skeleton: 0.9,
+    Zombie: 0.9,
+    Yeti: 1.1,
+    Giant: 1.4,
+    Demon: 1.4,
+  } as Record<string, number>,
 };

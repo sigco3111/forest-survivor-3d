@@ -65,6 +65,7 @@ type MonsterConfig = {
 	activityRadius: number
 	modelScale: number
 	hitStunMs: number
+	strengthMultipliers?: Record<string, number>
 }
 
 function seededRandom(seed: number) {
@@ -88,10 +89,12 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 		const modelIndex = Math.floor(rand() * config.modelUrls.length)
 		const [minScale, maxScale] = config.scaleRange
 		const scale = config.modelScale * (minScale + rand() * (maxScale - minScale))
+		const modelName = modelNames[modelIndex] || modelNames[0]
+		const strengthMultiplier = config.strengthMultipliers?.[modelName] ?? 1
 
 		monsters.push({
 			id: `monster-${i}`,
-			modelName: modelNames[modelIndex] || modelNames[0],
+			modelName,
 			modelIndex,
 			position,
 			rotation: rand() * Math.PI * 2,
@@ -100,9 +103,9 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 			patrolRadius: config.patrolRadius * (0.7 + rand() * 0.6),
 			speed: config.speed * (0.8 + rand() * 0.4),
 			detectionRadius: config.detectionRadius,
-			health: config.health,
-			maxHealth: config.health,
-			attackDamage: config.attackDamage,
+			health: Math.round(config.health * strengthMultiplier),
+			maxHealth: Math.round(config.health * strengthMultiplier),
+			attackDamage: Math.round(config.attackDamage * strengthMultiplier),
 			attackCooldownMs: config.attackCooldownMs,
 			activityRadius: config.activityRadius * (0.85 + rand() * 0.3),
 			hitStunMs: config.hitStunMs,
