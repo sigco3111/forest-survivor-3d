@@ -4,6 +4,8 @@ import {
   canReceivePlayerHit,
   createMonsterAgent,
   createMonsterResources,
+  createRespawnMonster,
+  effectiveDetectionRadius,
   isWithinAttackReach,
   type MonsterResource,
   type MonsterUpdateContext,
@@ -90,6 +92,81 @@ describe('monster resources', () => {
     })
 
     expect(resources.some(resource => resource.modelIndex === 6 && resource.modelName === 'Demon')).toBe(true)
+  })
+
+  it('createRespawnMonster applies strength multiplier and day scaling', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const baseConfig = {
+      modelUrls: ['/goblin.glb', '/giant.glb'],
+      seed: 7,
+      count: 2,
+      radiusMeters: 500,
+      scaleRange: [1, 1] as [number, number],
+      patrolRadius: 80,
+      speed: 22,
+      detectionRadius: 120,
+      attackRadius: 20,
+      health: 100,
+      attackDamage: 10,
+      attackCooldownMs: 1_500,
+      activityRadius: 170,
+      modelScale: 6,
+      hitStunMs: 700,
+      strengthMultipliers: { Goblin: 0.5, Giant: 2 } as Record<string, number>,
+      dayScalePerDay: 0.5,
+    }
+
+    // 1일차 리스폰: 배율만 적용 (Goblin 0.5 → 체력 50/공격 5). modelNames[2] = 'Goblin'
+    const goblin = createRespawnMonster(baseConfig, 'monster-respawn-0', 2, 1)
+    expect(goblin.id).toBe('monster-respawn-0')
+    expect(goblin.modelName).toBe('Goblin')
+    expect(goblin.health).toBe(50)
+    expect(goblin.maxHealth).toBe(50)
+    expect(goblin.attackDamage).toBe(5)
+    expect(Math.hypot(...goblin.position)).toBeLessThanOrEqual(400)
+
+    // 3일차 리스폰: 배율 × (1 + 2 × 0.5) = ×2 (Giant 2.0 → 체력 400/공격 40)
+    const giant = createRespawnMonster(baseConfig, 'monster-respawn-1', 1, 3)
+    expect(giant.modelName).toBe('Giant')
+    expect(giant.health).toBe(400)
+    expect(giant.maxHealth).toBe(400)
+    expect(giant.attackDamage).toBe(40)
+
+    // dayScalePerDay 미설정 → 스케일링 없음 (?? 0 기본 가지)
+    const { dayScalePerDay: _omitted, ...withoutScaling } = baseConfig
+    const plain = createRespawnMonster(withoutScaling, 'monster-respawn-2', 2, 5)
+    expect(plain.health).toBe(50)
+
+    // 범위 밖 인덱스 + 배율 미설정 → 기본 이름(Demon)/기본 배율(1) 가지
+    const { strengthMultipliers: _multipliers, ...withoutMultipliers } = baseConfig
+    const fallback = createRespawnMonster(withoutMultipliers, 'monster-respawn-3', 99, 1)
+    expect(fallback.modelName).toBe('Demon')
+    expect(fallback.health).toBe(100)
+  })
+
+  it('effectiveDetectionRadius widens at night and gates chase/hit recovery', () => {
+    // 기본 경계 135: 낮에는 150m를 못 느끼지만 밤(×1.5 = 202.5)에는 감지한다
+    const dayContext = makeContext({ playerPosition: [150, 0] })
+    const nightContext = makeContext({ playerPosition: [150, 0], isNight: true })
+
+    expect(effectiveDetectionRadius(dayContext)).toBe(135)
+    expect(effectiveDetectionRadius(nightContext)).toBeCloseTo(202.5)
+
+    const dayAgent = createMonsterAgent(makeResource({ health: 100 }))
+    dayAgent.update(0, 0, dayContext)
+    expect(dayAgent.state).toBe('idle')
+
+    const nightAgent = createMonsterAgent(makeResource({ health: 100 }))
+    nightAgent.update(0, 0, nightContext)
+    expect(nightAgent.state).toBe('chase')
+
+    // 추격 포기 판정도 야간에는 완화된다 (135 × 1.5 × 1.5 ≈ 303.75)
+    const chasing = createMonsterAgent(makeResource({ health: 100, activityRadius: 400 }))
+    chasing.state = 'chase'
+    chasing.update(0, 100, makeContext({ playerPosition: [290, 0], isNight: true }))
+    expect(chasing.state).toBe('chase')
+    chasing.update(0, 200, makeContext({ playerPosition: [290, 0] }))
+    expect(chasing.state).toBe('idle')
   })
 
   it('applies strength multipliers per model name and defaults to 1 for unknown models', () => {

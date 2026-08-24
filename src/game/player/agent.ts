@@ -46,6 +46,11 @@ export type PlayerAgentConfig = {
 	onAttackMonster?: (monsterId: string, damage: number) => void
 	playerMaxHealth: number           // 플레이어 최대 체력
 	killHealHealth: number            // 몬스터 처치 시 체력 회복량
+	expBase: number                   // 2레벨까지 필요 경험치
+	expGrowth: number                 // 레벨별 필요 경험치 증가율
+	levelAttackBonus: number          // 레벨당 공격력 증가
+	levelHealthBonus: number          // 레벨당 최대 체력 증가
+	levelSpeedBonus: number           // 레벨당 이동속도 증가
 	playerBasePower: number           // 플레이어 기본 전투력
 	powerPerWood: number              // 나무 1개당 전투력 증가량
 	monsterHealthPowerWeight: number  // 몬스터 체력 → 위협 전투력 가중치
@@ -69,6 +74,10 @@ export type PlayerAgent = {
 	woodCollected: number
 	health: number
 	maxHealth: number
+	exp: number
+	level: number
+	/** 실효 공격력 (레벨업으로 증가). 초기값은 config.playerAttackDamage. */
+	attackDamage: number
 	animation: 'walk' | 'interact' | 'attack' | null
 	lastCollectedTree: TreeResource | null
 	attackTarget: PlayerThreatSource | null
@@ -81,6 +90,8 @@ export type PlayerAgent = {
 	applyDamage(amount: number): void
 	/** 몬스터 처치 보상으로 체력을 회복한다(최대치까지). */
 	applyKillHeal(): void
+	/** 처치 경험치를 누적한다. 기준치를 넘으면 레벨업(공격력/체력/속도 증가)이 연속 발동한다. */
+	addExperience(amount: number): void
 }
 
 const AREA_FAILURE_LIMIT = 2
@@ -88,7 +99,22 @@ const AREA_FAILURE_MEMORY_MS = 22_000
 const AREA_AVOID_DURATION_MS = 45_000
 const AREA_AVOID_PADDING = 45
 
+// 직진이 막혔을 때 시도할 우회 각도(라디안). 장애물(풀/나무)에 끼여 무한 정체되는 것을 막는 스티어링 팬.
+const DETOUR_OFFSETS = [
+	0,
+	Math.PI / 6, -Math.PI / 6,
+	Math.PI / 3, -Math.PI / 3,
+	Math.PI / 2, -Math.PI / 2,
+	(2 * Math.PI) / 3, -(2 * Math.PI) / 3,
+	Math.PI,
+]
+
 let lastAttackSwing = 0
+
+/** 해당 레벨에 도달하기 위해 필요한 누적 구간 경험치. */
+export function expForLevel(level: number, config: Pick<PlayerAgentConfig, 'expBase' | 'expGrowth'>): number {
+	return Math.round(config.expBase * Math.pow(config.expGrowth, level - 1))
+}
 
 export function createPlayerAgent(
 	startPosition: PlanePoint,
@@ -105,6 +131,9 @@ export function createPlayerAgent(
 		woodCollected: 0,
 		health: config.playerMaxHealth,
 		maxHealth: config.playerMaxHealth,
+		exp: 0,
+		level: 1,
+		attackDamage: config.playerAttackDamage,
 		animation: 'walk',
 		lastCollectedTree: null,
 		attackTarget: null,
@@ -119,6 +148,20 @@ export function createPlayerAgent(
 
 		applyKillHeal() {
 			this.health = Math.min(this.maxHealth, this.health + config.killHealHealth)
+		},
+
+		addExperience(amount: number) {
+			this.exp += amount
+			let threshold = expForLevel(this.level, config)
+			while (this.exp >= threshold) {
+				this.exp -= threshold
+				this.level += 1
+				this.maxHealth += config.levelHealthBonus
+				this.health = Math.min(this.maxHealth, this.health + config.levelHealthBonus)
+				this.attackDamage += config.levelAttackBonus
+				config.speed += config.levelSpeedBonus
+				threshold = expForLevel(this.level, config)
+			}
 		},
 
 		update(delta, now) {
@@ -235,8 +278,16 @@ function updateApproaching(agent: PlayerAgent, delta: number, config: PlayerAgen
 	}
 
 	agent.target = [...agent.activeTree.position]
-	moveToward(agent, delta, config)
+	const moved = moveToward(agent, delta, config)
 	agent.bearing = faceTarget(agent, agent.target)
+
+	// 완전히 갇혀 진행 불가면 그 나무를 포기한다 (무한 "나무로 이동" 정체 방지)
+	if (!moved) {
+		agent.activeTree = null
+		agent.state = 'exploring'
+		agent.animation = 'walk'
+		return
+	}
 
 	const dist = distanceTo(agent.position, agent.activeTree.position)
 	if (dist <= config.collectRadius) {
@@ -307,7 +358,7 @@ function updateAttacking(agent: PlayerAgent, now: number, config: PlayerAgentCon
 	// 挥砍动画结束后真正造成伤害
 	if (now - lastAttackSwing >= swingWindow) {
 		if (liveTarget.id !== undefined) {
-			config.onAttackMonster?.(liveTarget.id, config.playerAttackDamage)
+			config.onAttackMonster?.(liveTarget.id, agent.attackDamage)
 		}
 		lastAttackSwing = now
 		agent.attackingProgress = 0
@@ -343,9 +394,12 @@ function updateHunting(
 	}
 
 	agent.target = [...liveTarget.position]
-	moveToward(agent, delta, config)
+	const moved = moveToward(agent, delta, config)
 	agent.bearing = faceTarget(agent, agent.target)
 	agent.animation = 'walk'
+
+	// 완전히 갇혀 표적으로 접근 불가면 추격을 포기한다
+	if (!moved) exitCombat(agent, config)
 }
 
 function findLiveTarget(agent: PlayerAgent, config: PlayerAgentConfig): PlayerThreatSource | null {
@@ -412,27 +466,36 @@ function updateFleeing(agent: PlayerAgent, delta: number, config: PlayerAgentCon
 }
 
 // ===== 移动 =====
-function moveToward(agent: PlayerAgent, delta: number, config: PlayerAgentConfig) {
+// 직진이 막히면 좌/우로 각도를 벌려 우회를 시도하고, 그마저 전부 막히면 탐색 목표를 다시 고른다.
+// 반환값: 실제로 이동했거나 도착 상태면 true, 완전히 갇혀 진행 불가면 false.
+function moveToward(agent: PlayerAgent, delta: number, config: PlayerAgentConfig): boolean {
 	const dx = agent.target[0] - agent.position[0]
 	const dz = agent.target[1] - agent.position[1]
 	const distance = Math.hypot(dx, dz)
 
-	if (distance < 1) return
+	if (distance < 1) return true
 
 	const travelDistance = Math.min(distance, config.speed * delta)
-	const directionX = dx / distance
-	const directionZ = dz / distance
-	const newPosition: PlanePoint = [
-		agent.position[0] + directionX * travelDistance,
-		agent.position[1] + directionZ * travelDistance,
-	]
+	const baseAngle = Math.atan2(dx, dz)
 
-	if (config.collisionCheck(newPosition)) {
-		agent.target = pickExplorationTarget(agent.position, config, agent.avoidedAreas)
-		return
+	for (const offset of DETOUR_OFFSETS) {
+		const angle = baseAngle + offset
+		// 직진(offset 0)은 기존과 동일한 정규화 벡터를 써서 부동소수점 오차를 피한다
+		const dirX = offset === 0 ? dx / distance : Math.sin(angle)
+		const dirZ = offset === 0 ? dz / distance : Math.cos(angle)
+		const candidate: PlanePoint = [
+			agent.position[0] + dirX * travelDistance,
+			agent.position[1] + dirZ * travelDistance,
+		]
+		if (!config.collisionCheck(candidate)) {
+			agent.position = candidate
+			return true
+		}
 	}
 
-	agent.position = newPosition
+	// 모든 방향이 막힘: 탐색 목표를 다시 정한다
+	agent.target = pickExplorationTarget(agent.position, config, agent.avoidedAreas)
+	return false
 }
 
 function faceTarget(agent: PlayerAgent, target: PlanePoint): number {

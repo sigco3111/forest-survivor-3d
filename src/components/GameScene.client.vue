@@ -1,6 +1,23 @@
 <template>
 	<div class="game-stage">
 		<div ref="sceneContainer" class="scene-container"></div>
+		<div class="monster-overlay" aria-hidden="true">
+			<div
+				v-for="bar in monsterBars"
+				:key="bar.id"
+				class="monster-hpbar"
+				:style="bar.style"
+			>
+				<div class="monster-hpbar__fill" :style="{ width: `${bar.percent}%` }"></div>
+			</div>
+			<div
+				v-for="popup in damagePopups"
+				:key="popup.id"
+				class="damage-popup"
+				:class="`damage-popup--${popup.kind}`"
+				:style="popup.style"
+			>{{ popup.text }}</div>
+		</div>
 		<div class="language-switcher" role="group" :aria-label="t('language.label')">
 			<button type="button" :class="{ active: locale === 'en' }" @click="changeLocale('en')">{{ t('language.english') }}</button>
 			<button type="button" :class="{ active: locale === 'zh-CN' }" @click="changeLocale('zh-CN')">{{ t('language.chinese') }}</button>
@@ -64,10 +81,15 @@
 			</div>
 			<div class="player-status__row">
 				<span class="player-status__label">{{ t('hud.status.power') }}</span>
-				<span class="player-status__value">{{ status.power }} · {{ t('hud.status.level') }} {{ status.level }}</span>
+				<span class="player-status__value">{{ status.power }}</span>
 			</div>
-			<div class="player-status__row player-status__row--hint">
-				<span>{{ status.nextLevelWood === null ? t('hud.status.maxLevel') : t('hud.status.nextLevel', { count: status.nextLevelWood }) }}</span>
+			<div class="player-status__row">
+				<span class="player-status__label">{{ t('hud.status.level') }}</span>
+				<span class="player-status__value">{{ status.level }}</span>
+			</div>
+			<div class="player-status__row">
+				<span class="player-status__label">{{ t('hud.status.exp') }}</span>
+				<span class="player-status__value">{{ status.exp }} / {{ status.expNext }}</span>
 			</div>
 			<div class="player-status__row">
 				<span class="player-status__label">{{ t('hud.status.target') }}</span>
@@ -130,6 +152,7 @@ import {
 	MONSTER_CONFIG,
 	MONSTER_GUARDIAN_CONFIG,
 	PLAYER_CONFIG,
+	PROGRESSION_CONFIG,
 	TREE_RESOURCE_CONFIG,
 } from '~/config'
 import {
@@ -138,6 +161,7 @@ import {
 } from '~/game/player/animations'
 import {
 	createPlayerAgent,
+	expForLevel,
 	type PlayerAgent,
 } from '~/game/player/agent'
 import {
@@ -157,6 +181,7 @@ import {
 import {
 	createMonsterAgent,
 	createMonsterResources,
+	createRespawnMonster,
 	type MonsterAgent,
 	type MonsterResource,
 	type MonsterUpdateContext,
@@ -213,7 +238,70 @@ const choppingHint = computed(() => {
 const attackingProgress = ref(0)
 const isInCombat = computed(() => attackingProgress.value > 0)
 
-// ===== 플레이어 상태 창: FSM 상태/전투력/레벨/타겟/주변 위협을 매 프레임 노출 =====
+// ===== 몬스터 HP바 + 데미지 팝업 오버레이 =====
+type MonsterBarView = { id: string; style: Record<string, string>; percent: number }
+type DamagePopupView = { id: number; kind: 'damage' | 'hurt'; text: string; createdAt: number; style: Record<string, string> }
+
+const monsterBars = ref<MonsterBarView[]>([])
+const damagePopups = ref<DamagePopupView[]>([])
+let popupSeq = 0
+const POPUP_LIFETIME_MS = 900
+const MONSTER_BAR_HEIGHT = 8 // 몬스터 머리 위 오프셋 (모델 높이 ≈ 6)
+
+// 월드 좌표 → 화면 픽셀 좌표. 카메라 뒤쪽이면 visible=false
+function projectWorldToScreen(x: number, y: number, z: number): { left: number; top: number; visible: boolean } {
+	if (!camera || !sceneContainer.value) return { left: 0, top: 0, visible: false }
+	const vector = new Vector3(x, y, z).project(camera)
+	if (vector.z > 1) return { left: 0, top: 0, visible: false }
+	return {
+		left: (vector.x * 0.5 + 0.5) * sceneContainer.value.clientWidth,
+		top: (-vector.y * 0.5 + 0.5) * sceneContainer.value.clientHeight,
+		visible: true,
+	}
+}
+
+function spawnDamagePopup(x: number, y: number, z: number, text: string, kind: 'damage' | 'hurt') {
+	const point = projectWorldToScreen(x, y, z)
+	if (!point.visible) return
+	damagePopups.value = [...damagePopups.value, {
+		id: ++popupSeq,
+		kind,
+		text,
+		createdAt: performance.now(),
+		style: { left: `${point.left}px`, top: `${point.top}px` },
+	}]
+}
+
+function updateMonsterOverlay() {
+	const now = performance.now()
+	damagePopups.value = damagePopups.value.filter(popup => now - popup.createdAt < POPUP_LIFETIME_MS)
+
+	if (!camera) {
+		monsterBars.value = []
+		return
+	}
+
+	const bars: MonsterBarView[] = []
+	for (const agent of monsterAgents) {
+		const resource = agent.resource
+		if (resource.health <= 0) continue
+		// 피해를 입었거나 전투 중인 몬스터만 표시
+		const hostile = agent.state === 'chase' || agent.state === 'attack' || agent.state === 'hit'
+		if (resource.health >= resource.maxHealth && !hostile) continue
+
+		const point = projectWorldToScreen(agent.position[0], MONSTER_BAR_HEIGHT, agent.position[1])
+		if (!point.visible) continue
+
+		bars.push({
+			id: resource.id,
+			style: { left: `${point.left}px`, top: `${point.top}px` },
+			percent: Math.max(0, Math.round((resource.health / resource.maxHealth) * 100)),
+		})
+	}
+	monsterBars.value = bars
+}
+
+// ===== 플레이어 상태 창: FSM 상태/체력/전투력/레벨/타겟/주변 위협을 매 프레임 노출 =====
 const STATUS_STATE_KEYS: Record<string, string> = {
 	exploring: 'hud.status.states.exploring',
 	approaching: 'hud.status.states.approaching',
@@ -223,15 +311,6 @@ const STATUS_STATE_KEYS: Record<string, string> = {
 	attacking: 'hud.status.states.attacking',
 }
 
-// 레벨 기준치: 몬스터 모델별 전투력(체력/공격력 배율 → 전투력 가중치 적용)을 오름차순 정렬.
-// 플레이어 전투력이 넘는 티어 수 + 1 = 현재 레벨 (예: 고블린만 이기면 Lv2, 전부 이기면 최고 레벨)
-const LEVEL_THRESHOLDS = Array.from(new Set(
-	Object.values(MONSTER_CONFIG.strengthMultipliers ?? {}).map(multiplier =>
-		Math.round(MONSTER_CONFIG.health * multiplier) * COMBAT_AGGRESSION_CONFIG.monsterHealthPowerWeight
-		+ Math.round(MONSTER_CONFIG.attackDamage * multiplier) * COMBAT_AGGRESSION_CONFIG.monsterAttackPowerWeight
-	),
-)).sort((a, b) => a - b)
-
 type PlayerStatusSnapshot = {
 	state: string
 	life: number
@@ -240,7 +319,8 @@ type PlayerStatusSnapshot = {
 	attack: number
 	power: number
 	level: number
-	nextLevelWood: number | null
+	exp: number
+	expNext: number
 	target: string
 	targetStrong: boolean
 	hostileCount: number
@@ -257,7 +337,8 @@ const status = ref<PlayerStatusSnapshot>({
 	attack: PLAYER_ATTACK_DAMAGE,
 	power: COMBAT_AGGRESSION_CONFIG.playerBasePower,
 	level: 1,
-	nextLevelWood: null,
+	exp: 0,
+	expNext: PROGRESSION_CONFIG.expBase,
 	target: '',
 	targetStrong: false,
 	hostileCount: 0,
@@ -282,12 +363,6 @@ function updatePlayerStatus() {
 	const agent = playerAgent
 	const power = COMBAT_AGGRESSION_CONFIG.playerBasePower
 		+ agent.woodCollected * COMBAT_AGGRESSION_CONFIG.powerPerWood
-	const level = LEVEL_THRESHOLDS.filter(threshold => threshold < power).length + 1
-	const nextThreshold = level - 1 < LEVEL_THRESHOLDS.length ? LEVEL_THRESHOLDS[level - 1] : null
-	// power > threshold 가 되는 최소 나무 수
-	const nextLevelWood = nextThreshold === null
-		? null
-		: Math.max(1, Math.floor(nextThreshold - power) + 1)
 
 	const [px, pz] = agent.position
 	const live = monsterAgents.filter(candidate => candidate.resource.health > 0)
@@ -321,10 +396,11 @@ function updatePlayerStatus() {
 		life: Math.max(0, agent.health),
 		lifeMax: agent.maxHealth,
 		wood: Math.max(0, agent.woodCollected),
-		attack: PLAYER_ATTACK_DAMAGE,
+		attack: agent.attackDamage,
 		power: Math.round(power),
-		level,
-		nextLevelWood,
+		level: agent.level,
+		exp: Math.floor(agent.exp),
+		expNext: expForLevel(agent.level, PROGRESSION_CONFIG),
 		target: targetResource
 			? `${targetResource.modelName} (${targetResource.health}/${targetResource.maxHealth})`
 			: '',
@@ -559,41 +635,68 @@ function createEnvObjects(targetScene: Scene) {
 	})
 }
 
+// 리스폰 대기열: 처치된 몬스터의 모델 인덱스와 부활 예정일
+const pendingRespawns: { dueDay: number; modelIndex: number }[] = []
+let respawnSeq = 0
+
 function createMonsters(targetScene: Scene) {
 	monsterResources = createMonsterResources(MONSTER_CONFIG)
 	monsterAgents.length = 0
 	monsterObjects.clear()
 	monsterAnimations.clear()
+	pendingRespawns.length = 0
 
 	// 每个怪物单独加载 GLB（蒙皮骨骼不能 clone）
-	monsterResources.forEach(m => {
-		const modelUrl = MONSTER_CONFIG.modelUrls[m.modelIndex]
-		new GLTFLoader().load(
-			assetURL(modelUrl),
-			gltf => {
-				if (monsterObjects.has(m.id)) return
-
-				const wrapper = new Group()
-				const model = normalizeModel(gltf.scene, MONSTER_CONFIG.modelScale, false)
-				model.rotation.y = m.rotation
-				wrapper.add(model)
-				wrapper.position.set(m.position[0], 0, m.position[1])
-				targetScene.add(wrapper)
-				monsterObjects.set(m.id, wrapper)
-
-				// 创建动画控制器（修复之前的 bug：动画未注册）
-				const animController = createMonsterAnimationController(model, gltf.animations)
-				monsterAnimations.set(m.id, animController)
-
-				// 创建怪物 AI，传入种植回调
-				monsterAgents.push(createMonsterAgent(m, (position) => {
-					plantTreeAtPosition(position)
-				}))
-			},
-			undefined,
-			error => console.error(`몬스터 모델 로드 실패: ${modelUrl}`, error),
-		)
+	monsterResources.forEach(resource => {
+		spawnMonsterVisual(resource, targetScene)
 	})
+}
+
+// 몬스터 1마리를 씬에 추가: GLB 개별 로드 → 래퍼/애니메이션/AI 에이전트 생성
+function spawnMonsterVisual(resource: MonsterResource, targetScene: Scene) {
+	const modelUrl = MONSTER_CONFIG.modelUrls[resource.modelIndex]
+	new GLTFLoader().load(
+		assetURL(modelUrl),
+		gltf => {
+			if (monsterObjects.has(resource.id)) return
+
+			const wrapper = new Group()
+			const model = normalizeModel(gltf.scene, MONSTER_CONFIG.modelScale, false)
+			model.rotation.y = resource.rotation
+			wrapper.add(model)
+			wrapper.position.set(resource.position[0], 0, resource.position[1])
+			targetScene.add(wrapper)
+			monsterObjects.set(resource.id, wrapper)
+
+			// 创建动画控制器（修复之前的 bug：动画未注册）
+			const animController = createMonsterAnimationController(model, gltf.animations)
+			monsterAnimations.set(resource.id, animController)
+
+			// 创建怪物 AI，传入种植回调
+			monsterAgents.push(createMonsterAgent(resource, (position) => {
+				plantTreeAtPosition(position)
+			}))
+		},
+		undefined,
+		error => console.error(`몬스터 모델 로드 실패: ${modelUrl}`, error),
+	)
+}
+
+// 새 날이 밝으면 기한이 된 리스폰을 처리한다. 총 몬스터 수는 설정치를 넘지 않는다.
+function processRespawns() {
+	if (!scene) return
+	while (pendingRespawns.length > 0 && monsterAgents.length < MONSTER_CONFIG.count) {
+		const task = pendingRespawns[0]
+		if (task.dueDay > currentDay.value) break
+		pendingRespawns.shift()
+		const resource = createRespawnMonster(
+			MONSTER_CONFIG,
+			`monster-respawn-${respawnSeq++}`,
+			task.modelIndex,
+			currentDay.value,
+		)
+		spawnMonsterVisual(resource, scene)
+	}
 }
 
 // 怪物种植回调：在指定位置创建新树
@@ -621,12 +724,16 @@ function handlePlayerAttack(monsterId: string, damage: number) {
 	if (index < 0) return
 	const agent = monsterAgents[index]
 	agent.resource.health -= damage
+	spawnDamagePopup(agent.position[0], 8, agent.position[1], `-${damage}`, 'damage')
 	if (agent.resource.health <= 0) {
 		monsterKills.value += 1
 		const reward = Math.max(1, Math.round(agent.resource.maxHealth * 0.3))
 		awardWood(reward)
-		// 처치 보상으로 체력 회복: 공격적인 사냥이 생존 전략이 되도록
+		// 처치 보상으로 체력 회복 + 경험치 (레벨업 시 공격력/체력/속도 증가)
 		playerAgent?.applyKillHeal()
+		playerAgent?.addExperience(agent.resource.maxHealth)
+		// 하루 뒤 같은 티어의 몬스터가 리스폰된다 (일차 스케일링 적용)
+		pendingRespawns.push({ dueDay: currentDay.value + 1, modelIndex: agent.resource.modelIndex })
 		disposeMonster(monsterId)
 	}
 }
@@ -811,6 +918,7 @@ function renderFrame() {
 	choppingProgress.value = playerAgent.choppingProgress
 	attackingProgress.value = playerAgent.attackingProgress
 	updatePlayerStatus()
+	updateMonsterOverlay()
 	if (playerAgent.lastCollectedTree) {
 		replaceTreeWithDeadModel(playerAgent.lastCollectedTree)
 		playerAgent.lastCollectedTree = null
@@ -828,6 +936,7 @@ function renderFrame() {
 	updateCamera()
 	renderer.render(scene, camera)
 	drawMinimap()
+	processRespawns()
 }
 
 function syncPlayerVisuals() {
@@ -849,17 +958,19 @@ function updateMonsters(delta: number, now: number) {
 			|| playerAgent.state === 'hunting',
 		playerIsFleeing: playerAgent.state === 'fleeing',
 		playerAttackRange: PLAYER_CONFIG.attackRangeMeters,
-		playerAttackDamage: PLAYER_ATTACK_DAMAGE,
+		playerAttackDamage: playerAgent.attackDamage,
 		onAttackPlayer: () => {
 			// 몬스터 공격: 나무 대신 체력을 깎는다 (HP 0 = 사망)
 			if (!playerAgent) return
 			playerAgent.applyDamage(MONSTER_CONFIG.attackDamage)
+			spawnDamagePopup(playerAgent.position[0], 8, playerAgent.position[1], `-${MONSTER_CONFIG.attackDamage}`, 'hurt')
 			if (!playerAgent.playerAlive) {
 				deathCause.value = 'slain'
 				playerAlive.value = false
 				gameOver.value = true
 			}
 		},
+		isNight: dayCycle?.state.isNight ?? false,
 	}
 
 	for (const agent of monsterAgents) {
@@ -1183,6 +1294,9 @@ function disposeScene() {
 	monsterAgents.length = 0
 	monsterObjects.clear()
 	monsterAnimations.clear()
+	pendingRespawns.length = 0
+	monsterBars.value = []
+	damagePopups.value = []
 	fadingTrees.length = 0
 	deadTreeTemplates.clear()
 	liveTreeTemplates.clear()
@@ -1204,6 +1318,62 @@ function disposeScene() {
 	height: 100vh;
 	overflow: hidden;
 	background: #87c6ef;
+}
+
+// 몬스터 HP바 + 데미지 팝업 오버레이 (월드 → 화면 투영)
+.monster-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 5;
+	overflow: hidden;
+	pointer-events: none;
+}
+
+.monster-hpbar {
+	position: absolute;
+	width: 44px;
+	height: 5px;
+	margin-left: -22px;
+	margin-top: -12px;
+	border-radius: 999px;
+	background: rgba(3, 12, 24, 0.75);
+	box-shadow: 0 0 6px rgba(0, 0, 0, 0.5);
+}
+
+.monster-hpbar__fill {
+	height: 100%;
+	border-radius: inherit;
+	background: linear-gradient(90deg, #ff4444, #ff8c00);
+}
+
+.damage-popup {
+	position: absolute;
+	margin-left: -14px;
+	color: #ffd166;
+	font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	font-size: 14px;
+	font-weight: 800;
+	text-shadow: 0 0 8px rgba(0, 0, 0, 0.8), 0 2px 4px rgba(0, 0, 0, 0.6);
+	animation: damage-popup-rise 0.9s ease-out forwards;
+}
+
+.damage-popup--hurt {
+	color: #ff6b6b;
+}
+
+@keyframes damage-popup-rise {
+	0% {
+		opacity: 0;
+		transform: translateY(0) scale(0.85);
+	}
+	15% {
+		opacity: 1;
+		transform: translateY(-6px) scale(1.05);
+	}
+	100% {
+		opacity: 0;
+		transform: translateY(-34px) scale(1);
+	}
 }
 
 .scene-container {

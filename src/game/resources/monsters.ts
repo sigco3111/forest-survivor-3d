@@ -27,6 +27,8 @@ export type MonsterUpdateContext = {
 	playerAlive: boolean
 	playerIsChopping: boolean
 	playerIsFleeing: boolean
+	/** 밤 여부. 밤에는 경계(탐지) 범위가 nightDetectionMultiplier배로 확대된다. */
+	isNight?: boolean
 	onAttackPlayer: () => void
 	playerAttackRange?: number
 	playerAttackDamage?: number
@@ -66,6 +68,8 @@ type MonsterConfig = {
 	modelScale: number
 	hitStunMs: number
 	strengthMultipliers?: Record<string, number>
+	/** 리스폰 몬스터 스케일링: 경과 일차당 체력/공격력 증가율 */
+	dayScalePerDay?: number
 }
 
 function seededRandom(seed: number) {
@@ -76,11 +80,12 @@ function seededRandom(seed: number) {
 	}
 }
 
+const modelNames = ['Demon', 'Giant', 'Goblin', 'Skeleton', 'Yeti', 'Zombie']
+
 export function createMonsterResources(config: MonsterConfig): MonsterResource[] {
 	const monsters: MonsterResource[] = []
 	const maxRadius = config.radiusMeters * 0.8
 	const rand = seededRandom(config.seed)
-	const modelNames = ['Demon', 'Giant', 'Goblin', 'Skeleton', 'Yeti', 'Zombie']
 
 	for (let i = 0; i < config.count; i++) {
 		const angle = rand() * Math.PI * 2
@@ -113,6 +118,45 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 	}
 
 	return monsters
+}
+
+/**
+ * 죽은 몬스터 자리에 리스폰되는 새 몬스터 리소스.
+ * - 위치/회전/크기는 Math.random 기반 (createRandomTree와 같은 의도적 비결정론 예외 — 테스트에서 mock)
+ * - 체력/공격력은 모델 강도 배율 × 일차 스케일(1 + (day-1) × dayScalePerDay)이 적용된다.
+ */
+export function createRespawnMonster(
+	config: MonsterConfig,
+	id: string,
+	modelIndex: number,
+	dayNumber: number,
+): MonsterResource {
+	const modelName = modelNames[modelIndex] ?? modelNames[0]
+	const strengthMultiplier = config.strengthMultipliers?.[modelName] ?? 1
+	const dayScale = 1 + (dayNumber - 1) * (config.dayScalePerDay ?? 0)
+	const maxRadius = config.radiusMeters * 0.8
+	const angle = Math.random() * Math.PI * 2
+	const dist = Math.sqrt(Math.random()) * maxRadius
+	const [minScale, maxScale] = config.scaleRange
+
+	return {
+		id,
+		modelName,
+		modelIndex,
+		position: [Math.cos(angle) * dist, Math.sin(angle) * dist],
+		rotation: Math.random() * Math.PI * 2,
+		scale: config.modelScale * (minScale + Math.random() * (maxScale - minScale)),
+		homePosition: [Math.cos(angle) * dist, Math.sin(angle) * dist],
+		patrolRadius: config.patrolRadius * (0.7 + Math.random() * 0.6),
+		speed: config.speed * (0.8 + Math.random() * 0.4),
+		detectionRadius: config.detectionRadius,
+		health: Math.round(config.health * strengthMultiplier * dayScale),
+		maxHealth: Math.round(config.health * strengthMultiplier * dayScale),
+		attackDamage: Math.round(config.attackDamage * strengthMultiplier * dayScale),
+		attackCooldownMs: config.attackCooldownMs,
+		activityRadius: config.activityRadius * (0.85 + Math.random() * 0.3),
+		hitStunMs: config.hitStunMs,
+	}
 }
 
 export function createMonsterAgent(
@@ -287,7 +331,7 @@ function updateChase(
 
 	// 玩家超出警觉范围 → 放弃追击
 	if (
-		distToPlayer > MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius * 1.5
+		distToPlayer > effectiveDetectionRadius(context) * 1.5
 		|| distanceTo(agent.position, agent.resource.homePosition) > agent.resource.activityRadius
 		|| distanceTo(context.playerPosition, agent.resource.homePosition) > agent.resource.activityRadius
 	) {
@@ -422,7 +466,7 @@ function updateHit(
 	if (
 		context.playerAlive
 		&& (context.playerIsChopping || context.playerIsFleeing)
-		&& distToPlayer < MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius
+		&& distToPlayer < effectiveDetectionRadius(context)
 		&& playerDistanceFromHome <= agent.resource.activityRadius
 	) {
 		agent.state = 'chase'
@@ -438,6 +482,12 @@ function updateHit(
 
 // ===== 辅助函数 =====
 
+/** 밤에는 경계 범위가 확대된 실효 탐지 반경 */
+export function effectiveDetectionRadius(context: Pick<MonsterUpdateContext, 'isNight'>): number {
+	const multiplier = context.isNight === true ? MONSTER_GUARDIAN_CONFIG.nightDetectionMultiplier : 1
+	return MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius * multiplier
+}
+
 function canChasePlayer(
 	agent: MonsterAgent,
 	distToPlayer: number,
@@ -446,7 +496,7 @@ function canChasePlayer(
 ): boolean {
 	return context.playerAlive
 		&& context.playerIsChopping
-		&& distToPlayer < MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius
+		&& distToPlayer < effectiveDetectionRadius(context)
 		&& playerDistanceFromHome <= agent.resource.activityRadius
 }
 

@@ -5,6 +5,7 @@ import {
   computePlayerPower,
   computeThreatStrength,
   createPlayerAgent,
+  expForLevel,
   findPreyTarget,
   isHostileThreat,
   isOutsidePlayerAttackRange,
@@ -45,6 +46,11 @@ function makeConfig(overrides: Partial<PlayerAgentConfig> = {}): PlayerAgentConf
     playerAttackDamage: 17,
     playerMaxHealth: 100,
     killHealHealth: 15,
+    expBase: 100,
+    expGrowth: 1.6,
+    levelAttackBonus: 3,
+    levelHealthBonus: 20,
+    levelSpeedBonus: 1,
     playerBasePower: 40,
     powerPerWood: 1,
     monsterHealthPowerWeight: 0.35,
@@ -158,6 +164,83 @@ describe('player agent', () => {
     agent.applyKillHeal()
     agent.applyKillHeal()
     expect(agent.health).toBe(100)
+  })
+
+  it('addExperience levels up and boosts attack/health/speed', () => {
+    const config = makeConfig()
+    const agent = createPlayerAgent([0, 0], config)
+    expect(agent.level).toBe(1)
+    expect(agent.attackDamage).toBe(17)
+
+    // 기준치 미만 → 레벨 유지, 경험치만 누적
+    agent.addExperience(50)
+    expect(agent.level).toBe(1)
+    expect(agent.exp).toBe(50)
+
+    // 100 도달 → 레벨 2: 공격 +3, 최대체력 +20(동시 회복), 속도 +1
+    agent.addExperience(50)
+    expect(agent.level).toBe(2)
+    expect(agent.exp).toBe(0)
+    expect(agent.attackDamage).toBe(20)
+    expect(agent.maxHealth).toBe(120)
+    expect(agent.health).toBe(120)
+    expect(config.speed).toBe(11)
+
+    // 이미 만 피격 상태에서 레벨업 → 최대치 clamp 가지
+    agent.applyDamage(0)
+    agent.health = 115
+    agent.addExperience(160) // 2→3 레벨 기준치
+    expect(agent.level).toBe(3)
+    expect(agent.health).toBe(135) // min(140, 115+20)
+    expect(agent.attackDamage).toBe(23)
+  })
+
+  it('expForLevel follows the configured growth curve', () => {
+    const config = makeConfig()
+    expect(expForLevel(1, config)).toBe(100)
+    expect(expForLevel(2, config)).toBe(160)
+    expect(expForLevel(3, config)).toBe(256)
+  })
+
+  it('steers around obstacles blocking the straight path', () => {
+    const agent = createPlayerAgent([0, 0], makeConfig({
+      // 정면(x축 라인)만 막힘: 우회 각도로는 통과 가능
+      collisionCheck: position => position[1] === 0 && position[0] > 0,
+    }))
+    agent.target = [10, 0]
+    agent.update(0.5, 0)
+
+    // 직진 [5,0]은 막혔지만 우회에 성공해 z축으로 벗어난 위치로 이동
+    expect(agent.position).not.toEqual([0, 0])
+    expect(agent.position[1]).not.toBe(0)
+  })
+
+  it('gives up a tree when every direction is blocked while approaching', () => {
+    const tree = makeTree({ position: [30, 0] })
+    const agent = createPlayerAgent([0, 0], makeConfig({
+      collisionCheck: () => true,
+      treeResources: () => [tree],
+    }))
+    agent.state = 'approaching'
+    agent.activeTree = tree
+    agent.update(0.5, 0)
+
+    expect(agent.state).toBe('exploring')
+    expect(agent.activeTree).toBeNull()
+  })
+
+  it('abandons combat when fully blocked while hunting', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0)
+    const prey = makeThreat({ id: 'goblin', position: [40, 0], homePosition: [0, 0], activityRadius: 200, speed: 1, health: 30 })
+    const agent = createPlayerAgent([0, 0], makeConfig({
+      collisionCheck: () => true,
+      threatSources: () => [prey],
+    }))
+
+    agent.update(0, 0)
+    // resolve가 사냥을 시작해도 이동이 막히면 같은 프레임에 전투를 종료한다
+    expect(agent.state).toBe('exploring')
+    expect(agent.attackTarget).toBeNull()
   })
 
   it('moves, handles collisions, and chooses a new exploration target', () => {

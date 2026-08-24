@@ -53,6 +53,15 @@ export const ENVIRONMENT_CONFIG = {
   collisionRadius: 6,
 };
 
+// 성장 설정: 몬스터 처치 경험치 → 레벨업 스탯 증가
+export const PROGRESSION_CONFIG = {
+  expBase: 100,        // 2레벨까지 필요 경험치
+  expGrowth: 1.6,      // 레벨별 필요 경험치 증가율
+  levelAttackBonus: 3, // 레벨당 공격력 증가
+  levelHealthBonus: 20, // 레벨당 최대 체력 증가 (동시에 회복)
+  levelSpeedBonus: 1,  // 레벨당 이동속도 증가
+};
+
 // 昼夜循环：1 分钟 = 游戏内 1 天
 export const DAY_CYCLE_CONFIG = {
   realMsPerDay: 60_000,        // 1 分钟 = 1 游戏天
@@ -75,6 +84,7 @@ export const COMBAT_AGGRESSION_CONFIG = {
 // 怪物看管植物配置
 export const MONSTER_GUARDIAN_CONFIG = {
   guardianDetectionRadius: 135,  // 玩家砍树时怪物的警觉范围
+  nightDetectionMultiplier: 1.5, // 밤에는 경계 범위 확대 (야간 위험도)
   tendPlantRadius: 120,          // 怪物寻找种植点的搜索半径
   tendPlantDurationMs: 4000,     // 种植动作持续时间
   plantTreeRadius: 30,           // 怪物种出的树之间的最小间距
@@ -114,4 +124,6 @@ export const MONSTER_CONFIG = {
     Giant: 1.4,
     Demon: 1.4,
   } as Record<string, number>,
+  // 리스폰 몬스터 스케일링: 경과 일차당 체력/공격력 증가율 (선형)
+  dayScalePerDay: 0.15,
 };
