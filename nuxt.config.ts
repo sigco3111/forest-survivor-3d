@@ -4,7 +4,7 @@ export default defineNuxtConfig({
 	srcDir: 'src/',
 	modules: ['@nuxtjs/i18n'],
 	i18n: {
-		defaultLocale: 'en',
+		defaultLocale: 'ko',
 		locales: [
 			{ code: 'en', language: 'en' },
 			{ code: 'zh-CN', language: 'zh-CN' },
@@ -25,7 +25,7 @@ export default defineNuxtConfig({
 		baseURL,
 		head: {
 			htmlAttrs: {
-				lang: 'en',
+				lang: 'ko',
 			},
 			link: [{ rel: 'icon', type: 'image/png', href: `${baseURL}favicon.png` }],
 			meta: [

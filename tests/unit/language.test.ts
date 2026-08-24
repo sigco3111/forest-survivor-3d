@@ -9,14 +9,14 @@ import {
 } from '../../src/i18n/language'
 
 describe('runtime language preferences', () => {
-	it('defaults to English without browser-language detection', () => {
+	it('defaults to Korean without browser-language detection', () => {
 		expect(normalizeLocale(undefined)).toBe(DEFAULT_LOCALE)
-		expect(readStoredLocale({ getItem: () => null })).toBe('en')
+		expect(readStoredLocale({ getItem: () => null })).toBe('ko')
 	})
 
 	it('restores Simplified Chinese and rejects obsolete values', () => {
 		expect(readStoredLocale({ getItem: () => 'zh-CN' })).toBe('zh-CN')
-		expect(readStoredLocale({ getItem: () => 'zh' })).toBe('en')
+		expect(readStoredLocale({ getItem: () => 'zh' })).toBe(DEFAULT_LOCALE)
 	})
 
 	it('persists an explicit language switch', () => {

@@ -1,5 +1,5 @@
-export const APP_LOCALES = ['en', 'zh-CN', 'ko'] as const
-export const DEFAULT_LOCALE = 'en'
+export const APP_LOCALES = ['ko', 'en', 'zh-CN'] as const
+export const DEFAULT_LOCALE = 'ko'
 export const LOCALE_STORAGE_KEY = 'forest-survivor-locale'
 
 export type AppLocale = (typeof APP_LOCALES)[number]

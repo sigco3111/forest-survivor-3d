@@ -4,7 +4,7 @@ import { messages } from './src/i18n/messages'
 
 export default defineI18nConfig(() => ({
 	legacy: false,
-	locale: 'en',
+	locale: 'ko',
 	fallbackLocale: 'en',
 	messages,
 }))
