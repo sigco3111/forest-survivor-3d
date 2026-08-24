@@ -29,9 +29,12 @@ export type MonsterUpdateContext = {
 	playerIsFleeing: boolean
 	/** 밤 여부. 밤에는 경계(탐지) 범위가 nightDetectionMultiplier배로 확대된다. */
 	isNight?: boolean
+	/**
+	 * 플레이어의 스윙이 이 프레임에 겨냥한 몬스터. 유일한 플레이어 공격 경로다.
+	 * 스윙 쿨다운(플레이어 에이전트)이 공격 빈도를 제한하므로 몬스터 쿨다운과 경쟁하지 않는다.
+	 */
+	incomingPlayerHit?: { id: string; damage: number }
 	onAttackPlayer: () => void
-	playerAttackRange?: number
-	playerAttackDamage?: number
 }
 
 export type MonsterAgent = {
@@ -182,6 +185,22 @@ export function createMonsterAgent(
 				if (this.state !== 'death') {
 					this.state = 'death'
 					this.animation = 'death'
+				}
+				return
+			}
+
+			// 플레이어의 스윙 처리: 피해 적용 → 사망 또는 경직(hit)
+			const incoming = context.incomingPlayerHit
+			if (incoming && incoming.id === this.resource.id && incoming.damage > 0) {
+				this.resource.health -= incoming.damage
+				if (this.resource.health <= 0) {
+					this.state = 'death'
+					this.animation = 'death'
+				} else {
+					this.state = 'hit'
+					this.animation = 'hit'
+					this.hitTimer = 0
+					this.target = [...context.playerPosition]
 				}
 				return
 			}
@@ -342,8 +361,6 @@ function updateChase(
 		return
 	}
 
-	if (tryReceivePlayerHit(agent, now, distToPlayer, context)) return
-
 	agent.target = [...context.playerPosition]
 	moveToward(agent, delta)
 	agent.bearing = faceTarget(agent, context.playerPosition)
@@ -390,61 +407,11 @@ function updateAttack(
 		return
 	}
 
-	// 玩家先手击中怪物 → 进入 hit 硬直
-	if (tryReceivePlayerHit(agent, now, distToPlayer, context)) return
-
 	// 攻击冷却到期 → 命中
 	if (now - agent.lastAttackTime >= agent.resource.attackCooldownMs) {
 		context.onAttackPlayer()
 		agent.lastAttackTime = now
 	}
-}
-
-export function canReceivePlayerHit(
-	range: number,
-	damage: number,
-	distToPlayer: number,
-	now: number,
-	agent: MonsterAgent,
-): boolean {
-	if (range <= 0) return false
-	if (damage <= 0) return false
-	if (!isWithinAttackReach(distToPlayer, range)) return false
-	if (now - agent.lastAttackTime < agent.resource.attackCooldownMs) return false
-	return true
-}
-
-export function isWithinAttackReach(distToPlayer: number, range: number): boolean {
-	if (distToPlayer > range) return false
-	return true
-}
-
-// ===== 尝试接受玩家的攻击（被击中则切到 hit 状态） =====
-function tryReceivePlayerHit(
-	agent: MonsterAgent,
-	now: number,
-	distToPlayer: number,
-	context: MonsterUpdateContext,
-): boolean {
-	const range = context.playerAttackRange ?? 0
-	const damage = context.playerAttackDamage ?? 0
-	if (!canReceivePlayerHit(range, damage, distToPlayer, now, agent)) return false
-
-	agent.resource.health -= damage
-	agent.lastAttackTime = now
-
-	if (agent.resource.health <= 0) {
-		agent.state = 'death'
-		agent.animation = 'death'
-		agent.hitTimer = 0
-		return true
-	}
-
-	agent.state = 'hit'
-	agent.animation = 'hit'
-	agent.hitTimer = 0
-	agent.target = [...context.playerPosition]
-	return true
 }
 
 // ===== hit：被玩家击中后硬直，计时结束后重新进入战斗或休闲 =====

@@ -80,6 +80,13 @@
 				<span class="player-status__value">{{ status.attack }}</span>
 			</div>
 			<div class="player-status__row">
+				<span class="player-status__label">{{ t('hud.status.weapon') }}</span>
+				<span class="player-status__value">Lv. {{ status.weaponTier }}</span>
+			</div>
+			<div class="player-status__row player-status__row--hint">
+				<span>{{ t('hud.status.nextUpgrade', { count: status.upgradeCost }) }}</span>
+			</div>
+			<div class="player-status__row">
 				<span class="player-status__label">{{ t('hud.status.power') }}</span>
 				<span class="player-status__value">{{ status.power }}</span>
 			</div>
@@ -154,6 +161,7 @@ import {
 	PLAYER_CONFIG,
 	PROGRESSION_CONFIG,
 	TREE_RESOURCE_CONFIG,
+	WEAPON_CONFIG,
 } from '~/config'
 import {
 	createPlayerAnimationController,
@@ -317,6 +325,8 @@ type PlayerStatusSnapshot = {
 	lifeMax: number
 	wood: number
 	attack: number
+	weaponTier: number
+	upgradeCost: number
 	power: number
 	level: number
 	exp: number
@@ -335,6 +345,8 @@ const status = ref<PlayerStatusSnapshot>({
 	lifeMax: PLAYER_CONFIG.maxHealth,
 	wood: 0,
 	attack: PLAYER_ATTACK_DAMAGE,
+	weaponTier: 0,
+	upgradeCost: WEAPON_CONFIG.upgradeCostBase,
 	power: COMBAT_AGGRESSION_CONFIG.playerBasePower,
 	level: 1,
 	exp: 0,
@@ -397,6 +409,8 @@ function updatePlayerStatus() {
 		lifeMax: agent.maxHealth,
 		wood: Math.max(0, agent.woodCollected),
 		attack: agent.attackDamage,
+		weaponTier: agent.weaponTier,
+		upgradeCost: agent.nextUpgradeCost(),
 		power: Math.round(power),
 		level: agent.level,
 		exp: Math.floor(agent.exp),
@@ -638,6 +652,11 @@ function createEnvObjects(targetScene: Scene) {
 // 리스폰 대기열: 처치된 몬스터의 모델 인덱스와 부활 예정일
 const pendingRespawns: { dueDay: number; modelIndex: number }[] = []
 let respawnSeq = 0
+// 플레이어 스윙 → 다음 updateMonsters에서 FSM이 처리할 유일한 피해 패킷
+let pendingPlayerHit: { id: string; damage: number } | null = null
+// 처치 보상 중복 지급 방지 + 사망 연출 중인 시체 (id → 연출 시작 시각)
+const settledKills = new Set<string>()
+const dyingMonsters = new Map<string, number>()
 
 function createMonsters(targetScene: Scene) {
 	monsterResources = createMonsterResources(MONSTER_CONFIG)
@@ -645,6 +664,9 @@ function createMonsters(targetScene: Scene) {
 	monsterObjects.clear()
 	monsterAnimations.clear()
 	pendingRespawns.length = 0
+	settledKills.clear()
+	dyingMonsters.clear()
+	pendingPlayerHit = null
 
 	// 每个怪物单独加载 GLB（蒙皮骨骼不能 clone）
 	monsterResources.forEach(resource => {
@@ -718,24 +740,25 @@ function plantTreeAtPosition(position: PlanePoint) {
 	spawnTreeVisual(newTree)
 }
 
-// 玩家攻击怪物回调：减少怪物的 health，归零则计入击杀并从场景中移除，结算 wood 报酬
+// 玩家攻击怪物回调：스윙 시점 기록 → 다음 updateMonsters에서 FSM이 피해/사망을 처리한다
 function handlePlayerAttack(monsterId: string, damage: number) {
-	const index = monsterAgents.findIndex(agent => agent.resource.id === monsterId)
-	if (index < 0) return
-	const agent = monsterAgents[index]
-	agent.resource.health -= damage
+	const agent = monsterAgents.find(candidate => candidate.resource.id === monsterId)
+	if (!agent || agent.resource.health <= 0) return
 	spawnDamagePopup(agent.position[0], 8, agent.position[1], `-${damage}`, 'damage')
-	if (agent.resource.health <= 0) {
-		monsterKills.value += 1
-		const reward = Math.max(1, Math.round(agent.resource.maxHealth * 0.3))
-		awardWood(reward)
-		// 처치 보상으로 체력 회복 + 경험치 (레벨업 시 공격력/체력/속도 증가)
-		playerAgent?.applyKillHeal()
-		playerAgent?.addExperience(agent.resource.maxHealth)
-		// 하루 뒤 같은 티어의 몬스터가 리스폰된다 (일차 스케일링 적용)
-		pendingRespawns.push({ dueDay: currentDay.value + 1, modelIndex: agent.resource.modelIndex })
-		disposeMonster(monsterId)
-	}
+	pendingPlayerHit = { id: monsterId, damage }
+}
+
+// 처치 정산: 나무 보상/체력 회복/경험치/리스폰 예약 (몬스터당 정확히 1회)
+function settleKill(agent: MonsterAgent) {
+	if (settledKills.has(agent.resource.id)) return
+	settledKills.add(agent.resource.id)
+	monsterKills.value += 1
+	awardWood(Math.max(1, Math.round(agent.resource.maxHealth * 0.3)))
+	// 처치 보상으로 체력 회복 + 경험치 (레벨업 시 공격력/체력/속도 증가)
+	playerAgent?.applyKillHeal()
+	playerAgent?.addExperience(agent.resource.maxHealth)
+	// 하루 뒤 같은 티어의 몬스터가 리스폰된다 (일차 스케일링 적용)
+	pendingRespawns.push({ dueDay: currentDay.value + 1, modelIndex: agent.resource.modelIndex })
 }
 
 // 结算 wood 报酬并刷新 HUD + 토스트 알림
@@ -827,12 +850,20 @@ function createPlayer(targetScene: Scene) {
 		onAttackMonster: (monsterId, damage) => handlePlayerAttack(monsterId, damage),
 		playerMaxHealth: PLAYER_CONFIG.maxHealth,
 		killHealHealth: PLAYER_CONFIG.killHealHealth,
+		regenHealthAmount: PLAYER_CONFIG.regenHealthAmount,
+		regenIntervalMs: PLAYER_CONFIG.regenIntervalMs,
+		criticalHealthRatio: PLAYER_CONFIG.criticalHealthRatio,
 		playerBasePower: COMBAT_AGGRESSION_CONFIG.playerBasePower,
 		powerPerWood: COMBAT_AGGRESSION_CONFIG.powerPerWood,
 		monsterHealthPowerWeight: COMBAT_AGGRESSION_CONFIG.monsterHealthPowerWeight,
 		monsterAttackPowerWeight: COMBAT_AGGRESSION_CONFIG.monsterAttackPowerWeight,
 		huntAggroRangeMultiplier: COMBAT_AGGRESSION_CONFIG.huntAggroRangeMultiplier,
 		huntGiveUpRangeMultiplier: COMBAT_AGGRESSION_CONFIG.huntGiveUpRangeMultiplier,
+		huntScanRangePerLevel: PROGRESSION_CONFIG.huntScanRangePerLevel,
+		upgradeCostBase: WEAPON_CONFIG.upgradeCostBase,
+		upgradeCostGrowth: WEAPON_CONFIG.upgradeCostGrowth,
+		weaponAttackPerTier: WEAPON_CONFIG.attackPerTier,
+		weaponPowerPerTier: WEAPON_CONFIG.powerPerTier,
 		worldRadius: WORLD_RADIUS,
 		collisionCheck: pos => checkCollision(pos),
 		treeResources: () => treeResources,
@@ -957,8 +988,8 @@ function updateMonsters(delta: number, now: number) {
 			|| playerAgent.state === 'attacking'
 			|| playerAgent.state === 'hunting',
 		playerIsFleeing: playerAgent.state === 'fleeing',
-		playerAttackRange: PLAYER_CONFIG.attackRangeMeters,
-		playerAttackDamage: playerAgent.attackDamage,
+		isNight: dayCycle?.state.isNight ?? false,
+		incomingPlayerHit: pendingPlayerHit,
 		onAttackPlayer: () => {
 			// 몬스터 공격: 나무 대신 체력을 깎는다 (HP 0 = 사망)
 			if (!playerAgent) return
@@ -970,11 +1001,15 @@ function updateMonsters(delta: number, now: number) {
 				gameOver.value = true
 			}
 		},
-		isNight: dayCycle?.state.isNight ?? false,
 	}
 
 	for (const agent of monsterAgents) {
 		agent.update(delta, now, monsterContext)
+		// FSM 경로의 사망(스윙 피해)도 씬 정산/청소 대상에 포함한다
+		if (agent.resource.health <= 0 && !dyingMonsters.has(agent.resource.id)) {
+			settleKill(agent)
+			dyingMonsters.set(agent.resource.id, now)
+		}
 		const obj = monsterObjects.get(agent.resource.id)
 		const anim = monsterAnimations.get(agent.resource.id)
 		if (!obj) continue
@@ -982,6 +1017,15 @@ function updateMonsters(delta: number, now: number) {
 		obj.rotation.y = agent.bearing
 		anim?.play(agent.animation as any)
 		anim?.update(delta)
+	}
+	pendingPlayerHit = null
+
+	// 사망 연출 종료 → 시체 정리 (죽는 애니메이션이 영구 반복되는 문제 방지)
+	for (const [monsterId, startedAt] of [...dyingMonsters]) {
+		if (now - startedAt >= MONSTER_CONFIG.deathAnimMs) {
+			dyingMonsters.delete(monsterId)
+			disposeMonster(monsterId)
+		}
 	}
 }
 
@@ -1295,6 +1339,9 @@ function disposeScene() {
 	monsterObjects.clear()
 	monsterAnimations.clear()
 	pendingRespawns.length = 0
+	settledKills.clear()
+	dyingMonsters.clear()
+	pendingPlayerHit = null
 	monsterBars.value = []
 	damagePopups.value = []
 	fadingTrees.length = 0

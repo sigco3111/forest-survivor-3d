@@ -12,6 +12,9 @@ export const PLAYER_CONFIG = {
   attackCooldownMs: 1500, // 攻击之间的冷却时间（毫秒）
   maxHealth: 100, // 플레이어 최대 체력. 몬스터 공격 = HP 데미지, HP 0 = 사망
   killHealHealth: 15, // 몬스터 처치 시 체력 회복량 (적극적인 전투가 생존 전략이 되도록)
+  regenHealthAmount: 2, // 비전투 중 체력 회복량 (틱당)
+  regenIntervalMs: 1000, // 비전투 체력 회복 틱 간격
+  criticalHealthRatio: 0.25, // 위기 체력 비율: 이하로 내려가면 교전을 접고 도주한다
 };
 
 // 树资源配置：使用确定性噪声生成，采集后枯树淡出并在随机位置重生。
@@ -60,6 +63,15 @@ export const PROGRESSION_CONFIG = {
   levelAttackBonus: 3, // 레벨당 공격력 증가
   levelHealthBonus: 20, // 레벨당 최대 체력 증가 (동시에 회복)
   levelSpeedBonus: 1,  // 레벨당 이동속도 증가
+  huntScanRangePerLevel: 20, // 레벨당 선제공격 스캔 범위 추가 (성장할수록 더 멀리서 사냥)
+};
+
+// 무기 강화: 나무를 소비해 영구 전투력/공격력으로 전환한다 (성장의 두 번째 축)
+export const WEAPON_CONFIG = {
+  upgradeCostBase: 30,     // 첫 강화 비용 (나무)
+  upgradeCostGrowth: 1.5,  // 강화 비용 증가율 (30 → 45 → 68 ...)
+  attackPerTier: 6,        // 티어당 공격력 증가
+  powerPerTier: 40,        // 티어당 전투력 증가 (소비한 나무보다 크게 — 강화가 항상 이득)
 };
 
 // 昼夜循环：1 分钟 = 游戏内 1 天
@@ -101,11 +113,11 @@ export const MONSTER_CONFIG = {
     "/models/monster/Zombie.glb",
   ],
   seed: 7300,
-  count: 15, // 怪物总数量
+  count: 20, // 怪物总数量 (조우율 확보를 위해 유지 — 리스폰 상한이기도 하다)
   radiusMeters: 900,
   modelScale: 6,
   scaleRange: [0.8, 1.2] as [number, number],
-  patrolRadius: 80,
+  patrolRadius: 110,
   speed: 22,
   detectionRadius: 120,
   attackRadius: 20,
@@ -126,4 +138,6 @@ export const MONSTER_CONFIG = {
   } as Record<string, number>,
   // 리스폰 몬스터 스케일링: 경과 일차당 체력/공격력 증가율 (선형)
   dayScalePerDay: 0.15,
+  // 사망 연출 유지 시간 (이후 시체 정리)
+  deathAnimMs: 1200,
 };

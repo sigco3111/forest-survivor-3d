@@ -7,8 +7,10 @@ import {
   createPlayerAgent,
   expForLevel,
   findPreyTarget,
+  findSeekTarget,
   isHostileThreat,
   isOutsidePlayerAttackRange,
+  isPlayerCritical,
   isThreatAtMeleeRange,
   isThreatWeakerThanPlayer,
   isWithinPlayerAttackRange,
@@ -46,11 +48,19 @@ function makeConfig(overrides: Partial<PlayerAgentConfig> = {}): PlayerAgentConf
     playerAttackDamage: 17,
     playerMaxHealth: 100,
     killHealHealth: 15,
+    regenHealthAmount: 2,
+    regenIntervalMs: 1000,
+    criticalHealthRatio: 0.25,
     expBase: 100,
     expGrowth: 1.6,
     levelAttackBonus: 3,
     levelHealthBonus: 20,
     levelSpeedBonus: 1,
+    huntScanRangePerLevel: 20,
+    upgradeCostBase: 30,
+    upgradeCostGrowth: 1.5,
+    weaponAttackPerTier: 6,
+    weaponPowerPerTier: 40,
     playerBasePower: 40,
     powerPerWood: 1,
     monsterHealthPowerWeight: 0.35,
@@ -166,6 +176,33 @@ describe('player agent', () => {
     expect(agent.health).toBe(100)
   })
 
+  it('regenerates health on a cadence while out of combat and pauses during combat', () => {
+    const agent = createPlayerAgent([0, 0], makeConfig())
+    agent.applyDamage(30)
+    expect(agent.health).toBe(70)
+
+    // 탐색 중: 600ms는 틱 간격(1000ms) 미만 → 회복 없음
+    agent.update(0.6, 0)
+    expect(agent.health).toBe(70)
+
+    // 누적 1100ms → 틱 도달, +2 회복
+    agent.update(0.5, 600)
+    expect(agent.health).toBe(72)
+
+    // 이미 만 피 → clamp
+    agent.health = agent.maxHealth
+    agent.update(1.2, 1_100)
+    expect(agent.health).toBe(agent.maxHealth)
+
+    // 전투(공격) 중에는 회복 타이머 리셋 → 회복 없음
+    agent.health = 50
+    agent.state = 'attacking'
+    agent.attackTarget = makeThreat({ id: 'm1', position: [5, 0], homePosition: [0, 0], activityRadius: 50, attackRadius: 20 })
+    agent.update(2, 2_000)
+    expect(agent.health).toBe(50)
+    expect(agent.regenTimer).toBe(0)
+  })
+
   it('addExperience levels up and boosts attack/health/speed', () => {
     const config = makeConfig()
     const agent = createPlayerAgent([0, 0], config)
@@ -200,6 +237,177 @@ describe('player agent', () => {
     expect(expForLevel(1, config)).toBe(100)
     expect(expForLevel(2, config)).toBe(160)
     expect(expForLevel(3, config)).toBe(256)
+  })
+
+  it('upgradeWeapon spends wood and permanently boosts attack and power', () => {
+    const config = makeConfig()
+    const agent = createPlayerAgent([0, 0], config)
+    expect(agent.weaponTier).toBe(0)
+    expect(agent.nextUpgradeCost()).toBe(30)
+
+    // 나무 부족 → 강화 실패, 상태 불변
+    agent.woodCollected = 10
+    expect(agent.upgradeWeapon()).toBe(false)
+    expect(agent.weaponTier).toBe(0)
+
+    // 강화 성공: 나무 30 소비, 공격 +6, 전투력 가중 +40
+    agent.woodCollected = 40
+    expect(agent.upgradeWeapon()).toBe(true)
+    expect(agent.weaponTier).toBe(1)
+    expect(agent.woodCollected).toBe(10)
+    expect(agent.attackDamage).toBe(23) // 17 + 6
+    expect(agent.weaponPower).toBe(40)
+    expect(agent.nextUpgradeCost()).toBe(45) // 30 × 1.5
+  })
+
+  it('auto-upgrades the weapon every frame while wood affords it', () => {
+    const config = makeConfig()
+    const agent = createPlayerAgent([0, 0], config)
+    agent.woodCollected = 100
+
+    agent.update(0, 0)
+
+    // 30 소비(잔여 70) → 45 소비(잔여 25) → 다음 68은 부족 → 정지
+    expect(agent.weaponTier).toBe(2)
+    expect(agent.woodCollected).toBe(25)
+    expect(agent.attackDamage).toBe(29) // 17 + 6×2
+    expect(agent.weaponPower).toBe(80)
+  })
+
+  it('computePlayerPower includes the weapon contribution', () => {
+    const config = makeConfig()
+    const agent = createPlayerAgent([0, 0], config)
+    agent.woodCollected = 20
+    agent.weaponPower = 80
+    expect(computePlayerPower(agent, config)).toBe(40 + 20 + 80)
+  })
+
+  it('findSeekTarget picks the nearest weaker enemy worldwide', () => {
+    const config = makeConfig({ threatSources: () => [] })
+    const agent = createPlayerAgent([0, 0], config)
+
+    const dead = makeThreat({ id: 'dead', position: [10, 0], homePosition: [0, 0], activityRadius: 1, health: 0 })
+    const stronger = makeThreat({ id: 'stronger', position: [12, 0], homePosition: [0, 0], activityRadius: 1, health: 900 })
+    // 스캔 범위(80)와 활동 반경을 전부 벗어난 원거리 사냥감 — seek는 이것도 잡는다
+    const farPrey = makeThreat({ id: 'farPrey', position: [400, 0], homePosition: [400, 0], activityRadius: 50, health: 30 })
+    const nearPrey = makeThreat({ id: 'nearPrey', position: [200, 0], homePosition: [200, 0], activityRadius: 50, health: 30 })
+    const tiedPrey = makeThreat({ id: 'tiedPrey', position: [0, 200], homePosition: [0, 200], activityRadius: 50, health: 30 })
+
+    expect(findSeekTarget(agent, { ...config, threatSources: () => [dead] })).toBeNull()
+    expect(findSeekTarget(agent, { ...config, threatSources: () => [stronger] })).toBeNull()
+    // 동거리 타이 → isCloserThreat false 가지, 먼저 나온 nearPrey 유지
+    expect(findSeekTarget(agent, { ...config, threatSources: () => [dead, stronger, farPrey, nearPrey, tiedPrey] })?.id).toBe('nearPrey')
+  })
+
+  it('exploring drifts toward the nearest weaker enemy instead of wandering', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0)
+    const prey = makeThreat({ id: 'goblin', position: [300, 0], homePosition: [300, 0], activityRadius: 50, speed: 1, health: 30 })
+    const agent = createPlayerAgent([0, 0], makeConfig({ threatSources: () => [prey] }))
+    agent.target = [0, 0] // 도착 상태로 만들어 탐색 재선택을 유도
+
+    agent.update(0.001, 0)
+
+    // 무작위 탐색 지점이 아니라 사냥감 위치를 향해 진행한다 (아직 스캔 범위 밖이라 hunting 아님)
+    expect(agent.state).toBe('exploring')
+    expect(agent.target).toEqual([300, 0])
+  })
+
+  it('widens the prey scan range as the level grows', () => {
+    const config = makeConfig({ threatSources: () => [] })
+    const agent = createPlayerAgent([0, 0], config)
+    const prey = makeThreat({ id: 'prey', position: [100, 0], homePosition: [0, 0], activityRadius: 200, health: 30 })
+
+    // 레벨 1: 스캔 80 → 밖
+    expect(findPreyTarget(agent, { ...config, threatSources: () => [prey] })).toBeNull()
+
+    // 레벨 3: 스캔 80 + 2×20 = 120 → 잡힘
+    agent.level = 3
+    expect(findPreyTarget(agent, { ...config, threatSources: () => [prey] })?.id).toBe('prey')
+  })
+
+  it('isPlayerCritical marks health at or below the configured ratio', () => {
+    const config = makeConfig()
+    const agent = createPlayerAgent([0, 0], config)
+
+    agent.health = 25 // 100 × 0.25 → 경계값 포함
+    expect(isPlayerCritical(agent, config)).toBe(true)
+    agent.health = 26
+    expect(isPlayerCritical(agent, config)).toBe(false)
+  })
+
+  it('breaks off an ongoing fight and flees when health turns critical', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0)
+    const threat = makeThreat({ id: 'm1', position: [5, 0], homePosition: [0, 0], activityRadius: 100, speed: 1, attackRadius: 20, health: 30 })
+    const config = makeConfig({ attackRangeMeters: 10, threatSources: () => [threat] })
+    const agent = createPlayerAgent([0, 0], config)
+    agent.woodCollected = 100 // 전투력 우위 → 평소엔 싸움
+
+    agent.update(0, 0)
+    expect(agent.state).toBe('attacking')
+
+    // 체력 20%로 급락 → 교전 즉시 이탈 후 도주
+    agent.health = 20
+    agent.update(0, 100)
+    expect(agent.state).toBe('fleeing')
+
+    // 위기 체력에서 표적 없는 공격 상태면 그냥 전투를 종료한다 (break-off null-target 가지)
+    agent.state = 'attacking'
+    agent.attackTarget = null
+    agent.update(0, 200)
+    expect(agent.state).toBe('exploring')
+  })
+
+  it('breaks off a hunt when health turns critical', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0)
+    const prey = makeThreat({ id: 'goblin', position: [40, 0], homePosition: [0, 0], activityRadius: 500, speed: 1, health: 30 })
+    const agent = createPlayerAgent([0, 0], makeConfig({ threatSources: () => [prey] }))
+
+    agent.update(0, 0)
+    expect(agent.state).toBe('hunting')
+
+    agent.health = 20
+    agent.update(0, 100)
+    expect(agent.state).toBe('fleeing')
+  })
+
+  it('flees from any hostile threat while critical, even a beatable one', () => {
+    const chaser = makeThreat({ id: 'goblin', position: [15, 0], homePosition: [0, 0], activityRadius: 200, speed: 1, attackRadius: 2, health: 10 })
+    const config = makeConfig({ threatSources: () => [chaser] })
+    const agent = createPlayerAgent([0, 0], config)
+    agent.woodCollected = 100 // 이길 수 있어도 위기 체력에선 도주
+    agent.health = 20
+
+    agent.update(0, 0)
+
+    expect(agent.state).toBe('fleeing')
+  })
+
+  it('does not start new fights or seek prey while critical', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    // 비적대(배회 중) 사냥감이 스캔 범위 안에 있어도 위기 체력에선 교전하지 않는다
+    const prey = makeThreat({ id: 'goblin', position: [15, 0], homePosition: [0, 0], activityRadius: 200, speed: 1, attackRadius: 2, health: 10, hostile: false })
+    const agent = createPlayerAgent([0, 0], makeConfig({ threatSources: () => [prey] }))
+    agent.woodCollected = 100
+    agent.health = 20
+
+    agent.update(0, 0)
+
+    expect(agent.state).toBe('exploring')
+    expect(agent.attackTarget).toBeNull()
+  })
+
+  it('stops seeking prey while critical', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const prey = makeThreat({ id: 'goblin', position: [300, 0], homePosition: [300, 0], activityRadius: 50, speed: 1, health: 10, hostile: false })
+    const agent = createPlayerAgent([0, 0], makeConfig({ threatSources: () => [prey] }))
+    agent.health = 20
+    agent.target = [0, 0]
+
+    agent.update(0.001, 0)
+
+    // 사냥 직행 대신 무작위 탐색 지점을 고른다
+    expect(agent.state).toBe('exploring')
+    expect(agent.target).not.toEqual([300, 0])
   })
 
   it('steers around obstacles blocking the straight path', () => {

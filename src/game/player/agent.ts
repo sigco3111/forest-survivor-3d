@@ -46,11 +46,19 @@ export type PlayerAgentConfig = {
 	onAttackMonster?: (monsterId: string, damage: number) => void
 	playerMaxHealth: number           // 플레이어 최대 체력
 	killHealHealth: number            // 몬스터 처치 시 체력 회복량
+	regenHealthAmount: number         // 비전투 중 체력 회복량 (틱당)
+	regenIntervalMs: number           // 비전투 체력 회복 틱 간격
+	criticalHealthRatio: number       // 위기 체력 비율 (이하 → 도주 우선)
 	expBase: number                   // 2레벨까지 필요 경험치
 	expGrowth: number                 // 레벨별 필요 경험치 증가율
 	levelAttackBonus: number          // 레벨당 공격력 증가
 	levelHealthBonus: number          // 레벨당 최대 체력 증가
 	levelSpeedBonus: number           // 레벨당 이동속도 증가
+	huntScanRangePerLevel: number     // 레벨당 선제공격 스캔 범위 추가치
+	upgradeCostBase: number           // 무기 첫 강화 비용 (나무)
+	upgradeCostGrowth: number         // 무기 강화 비용 증가율
+	weaponAttackPerTier: number       // 무기 티어당 공격력 증가
+	weaponPowerPerTier: number        // 무기 티어당 전투력 증가
 	playerBasePower: number           // 플레이어 기본 전투력
 	powerPerWood: number              // 나무 1개당 전투력 증가량
 	monsterHealthPowerWeight: number  // 몬스터 체력 → 위협 전투력 가중치
@@ -76,12 +84,18 @@ export type PlayerAgent = {
 	maxHealth: number
 	exp: number
 	level: number
-	/** 실효 공격력 (레벨업으로 증가). 초기값은 config.playerAttackDamage. */
+	/** 실효 공격력 (레벨/무기 강화로 증가). 초기값은 config.playerAttackDamage. */
 	attackDamage: number
+	/** 무기 강화 티어 (0 = 기본 무기) */
+	weaponTier: number
+	/** 무기 강화가 전투력에 더하는 값 (tier × weaponPowerPerTier) */
+	weaponPower: number
 	animation: 'walk' | 'interact' | 'attack' | null
 	lastCollectedTree: TreeResource | null
 	attackTarget: PlayerThreatSource | null
 	playerAlive: boolean
+	/** 비전투 회복 타이머 (ms). 전투/추격/도망 진입 시 리셋. */
+	regenTimer: number
 	avoidedAreas: AvoidedArea[]
 	failedAreaAttempt: FailedAreaAttempt | null
 
@@ -92,6 +106,10 @@ export type PlayerAgent = {
 	applyKillHeal(): void
 	/** 처치 경험치를 누적한다. 기준치를 넘으면 레벨업(공격력/체력/속도 증가)이 연속 발동한다. */
 	addExperience(amount: number): void
+	/** 다음 무기 강화 비용 (나무). */
+	nextUpgradeCost(): number
+	/** 나무를 소비해 무기를 강화한다. 나무가 부족하면 false. */
+	upgradeWeapon(): boolean
 }
 
 const AREA_FAILURE_LIMIT = 2
@@ -134,10 +152,13 @@ export function createPlayerAgent(
 		exp: 0,
 		level: 1,
 		attackDamage: config.playerAttackDamage,
+		weaponTier: 0,
+		weaponPower: 0,
 		animation: 'walk',
 		lastCollectedTree: null,
 		attackTarget: null,
 		playerAlive: true,
+		regenTimer: 0,
 		avoidedAreas: [],
 		failedAreaAttempt: null,
 
@@ -164,9 +185,45 @@ export function createPlayerAgent(
 			}
 		},
 
+		nextUpgradeCost() {
+			return Math.round(config.upgradeCostBase * Math.pow(config.upgradeCostGrowth, this.weaponTier))
+		},
+
+		upgradeWeapon() {
+			const cost = this.nextUpgradeCost()
+			if (this.woodCollected < cost) return false
+			this.woodCollected -= cost
+			this.weaponTier += 1
+			this.attackDamage += config.weaponAttackPerTier
+			this.weaponPower += config.weaponPowerPerTier
+			return true
+		},
+
 		update(delta, now) {
 			if (!this.playerAlive) return
 			pruneAvoidedAreas(this, now)
+			// 나무가 충분하면 즉시 무기를 강화한다 (나무 = 휘발성 자원 → 영구 전투력 전환)
+			while (this.upgradeWeapon()) { /* 여러 단계 연속 강화 */ }
+
+			// 비전투 중(탐색/이동/벌목)에는 일정 간격으로 체력 회복. 전투/추격/도망 중에는 정지.
+			if (this.state === 'exploring' || this.state === 'approaching' || this.state === 'chopping') {
+				this.regenTimer += delta * 1000
+				if (this.regenTimer >= config.regenIntervalMs) {
+					this.regenTimer -= config.regenIntervalMs
+					this.health = Math.min(this.maxHealth, this.health + config.regenHealthAmount)
+				}
+			} else {
+				this.regenTimer = 0
+			}
+
+			// 위기 체력(기준 이하)이면 교전을 접고 도주한다
+			if (
+				(this.state === 'attacking' || this.state === 'hunting')
+				&& isPlayerCritical(this, config)
+				&& this.attackTarget
+			) {
+				startFleeing(this, this.attackTarget, config, now)
+			}
 
 			// 공격 중이 아니면 매 프레임 전투 의사를 다시 판단한다:
 			// 1) 이길 수 없는 적이 쫓아오면 도망 (또는 이미 붙었으면 맞서싸움)
@@ -201,25 +258,39 @@ export function createPlayerAgent(
 
 // ===== 전투 의사 결정: 강한 적 회피 → 약한 적 선제공격 =====
 function resolveCombatIntent(agent: PlayerAgent, now: number, config: PlayerAgentConfig) {
+	const critical = isPlayerCritical(agent, config)
 	const hostiles = config.threatSources().filter(isHostileThreat)
-	const strongThreat = findNearestStrongThreat(agent, hostiles, config)
 
-	if (strongThreat) {
-		const distanceToThreat = distanceTo(agent.position, strongThreat.position)
+	// 위기 체력에서는 "이길 수 없는 적"뿐 아니라 모든 적대적 위협이 도망 대상이다
+	const threat = critical
+		? findActiveThreat(agent.position, config)
+		: findNearestStrongThreat(agent, hostiles, config)
 
-		if (agent.state !== 'fleeing' && shouldFleeThreat(agent, now, strongThreat, config)) {
-			registerFailedAreaAttempt(agent, strongThreat, now)
-			startFleeing(agent, strongThreat, config, now)
-			return
-		}
+	if (threat) {
+		if (agent.state !== 'fleeing') {
+			if (critical) {
+				// 위기 체력: 근접 반격 없이 무조건 도주
+				registerFailedAreaAttempt(agent, threat, now)
+				startFleeing(agent, threat, config, now)
+				return
+			}
+			if (shouldFleeThreat(agent, now, threat, config)) {
+				registerFailedAreaAttempt(agent, threat, now)
+				startFleeing(agent, threat, config, now)
+				return
+			}
 
-		// 이길 수 없는 적이 바로 옆까지 붙었다면 도망 대신 맞서싸운다
-		if (distanceToThreat <= Math.max(config.attackRangeMeters, strongThreat.attackRadius)) {
-			engageTarget(agent, strongThreat, now, config)
-			return
+			// 이길 수 없는 적이 바로 옆까지 붙었다면 도망 대신 맞서싸운다
+			if (distanceTo(agent.position, threat.position) <= Math.max(config.attackRangeMeters, threat.attackRadius)) {
+				engageTarget(agent, threat, now, config)
+				return
+			}
 		}
 		// 멀리 있는 강한 적에게서 도망 중이라면 도망을 지속한다 (updateFleeing 담당)
 	}
+
+	// 위기 체력에서는 새 전투를 시작하지 않는다 — 이탈 후 비전투 회복으로 재개한다
+	if (critical) return
 
 	// 도망할 이유가 없으면 가장 가까운 "약한 적"을 먼저 찾아 들어간다
 	const prey = findPreyTarget(agent, config)
@@ -246,11 +317,17 @@ function engageTarget(
 let lastTreeScan = 0
 
 function updateExploring(agent: PlayerAgent, delta: number, config: PlayerAgentConfig) {
-	moveToward(agent, delta, config)
-
-	if (distanceTo(agent.position, agent.target) < 2) {
+	// 사냥 본능: 잡을 만한(나보다 약한) 적이 존재하면 무작위 배회 대신 그쪽으로 이동한다.
+	// 위기 체력에서는 사냥 자체를 쉰다 (회복 우선).
+	// 나무가 근처(탐색 반경)에 있으면 아래 스캔이 벌목을 우선시한다 — 이동 중 opportunistic 벌목 유지.
+	const seek = isPlayerCritical(agent, config) ? null : findSeekTarget(agent, config)
+	if (seek) {
+		agent.target = [...seek.position]
+	} else if (distanceTo(agent.position, agent.target) < 2) {
 		agent.target = pickExplorationTarget(agent.position, config, agent.avoidedAreas)
 	}
+
+	moveToward(agent, delta, config)
 
 	// 每隔一小段距离扫描附近是否有树
 	const nearbyTree = findNearbyTree(
@@ -638,7 +715,9 @@ export function isOutsidePlayerAttackRange(distanceToThreat: number, playerAttac
 
 // ===== 전투력 비교: 나보다 약한 적인가? =====
 export function computePlayerPower(agent: PlayerAgent, config: PlayerAgentConfig): number {
-	return config.playerBasePower + agent.woodCollected * config.powerPerWood
+	return config.playerBasePower
+		+ agent.woodCollected * config.powerPerWood
+		+ agent.weaponPower
 }
 
 export function computeThreatStrength(threat: PlayerThreatSource, config: PlayerAgentConfig): number {
@@ -672,9 +751,19 @@ export function mustFlee(
 	return !canWinAgainstThreat(agent, threat, config)
 }
 
+/** 위기 체력: maxHealth × criticalHealthRatio 이하면 true. 도주 우선 모드. */
+export function isPlayerCritical(
+	agent: PlayerAgent,
+	config: Pick<PlayerAgentConfig, 'criticalHealthRatio'>,
+): boolean {
+	return agent.health <= agent.maxHealth * config.criticalHealthRatio
+}
+
 // ===== 사냥감 탐색: 활동 반경 안에서 "나보다 약한" 가장 가까운 적 =====
 export function findPreyTarget(agent: PlayerAgent, config: PlayerAgentConfig): PlayerThreatSource | null {
+	// 스캔 범위는 레벨과 함께 넓어진다 (성장할수록 더 멀리서 전투를 시작)
 	const scanRange = config.attackRangeMeters * config.huntAggroRangeMultiplier
+		+ (agent.level - 1) * config.huntScanRangePerLevel
 	let nearest: PlayerThreatSource | null = null
 	let nearestDistance = Number.POSITIVE_INFINITY
 	for (const threat of config.threatSources()) {
@@ -700,6 +789,23 @@ function isCloserThreat(distanceFromThreat: number, nearestDistance: number): bo
 /** 추격/공격 중인(플레이어에게 적대적인) 위협인지. 기본값은 true. */
 export function isHostileThreat(threat: PlayerThreatSource): boolean {
 	return threat.hostile !== false
+}
+
+// ===== 사냥 본능: 활동 반경/스캔 범위 제한 없이 세계에서 가장 가까운 "약한" 적 =====
+// 탐색 중일 때 이 대상을 향해 걸어가므로, 성장할수록(약한 적 판정이 넓어질수록) 전투가 빈번해진다.
+export function findSeekTarget(agent: PlayerAgent, config: PlayerAgentConfig): PlayerThreatSource | null {
+	let nearest: PlayerThreatSource | null = null
+	let nearestDistance = Number.POSITIVE_INFINITY
+	for (const threat of config.threatSources()) {
+		if (isDeadThreat(threat)) continue
+		if (!isThreatWeakerThanPlayer(agent, threat, config)) continue
+		const distance = distanceTo(agent.position, threat.position)
+		if (isCloserThreat(distance, nearestDistance)) {
+			nearest = threat
+			nearestDistance = distance
+		}
+	}
+	return nearest
 }
 
 function findNearestStrongThreat(

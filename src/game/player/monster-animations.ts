@@ -3,6 +3,7 @@ import {
 	AnimationClip,
 	AnimationMixer,
 	Object3D,
+	LoopOnce,
 } from 'three'
 
 export type MonsterAnimationName = 'idle' | 'walk' | 'run' | 'attack' | 'death' | 'hit' | 'tend'
@@ -48,6 +49,13 @@ export function createMonsterAnimationController(
 		tend: createAction(mixer, animations, 'tend'),
 	}
 	let currentAction: AnimationAction | null = null
+
+	// death 클립은 한 번만 재생하고 마지막 프레임에 고정한다 (무한 루프 방지)
+	const deathAction = actions.death
+	if (deathAction) {
+		deathAction.setLoop(LoopOnce, 1)
+		deathAction.clampWhenFinished = true
+	}
 
 	const play = (name: MonsterAnimationName) => {
 		const nextAction = actions[name]
