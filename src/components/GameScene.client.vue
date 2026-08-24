@@ -13,6 +13,7 @@
 			<div class="resource-panel__consumption">{{ t('hud.dailyUse', { count: woodPerDay }) }}</div>
 			<div class="resource-panel__hint">{{ choppingHint }}</div>
 			<div v-if="lowWoodWarning" class="resource-panel__warning">{{ t('hud.lowWood') }}</div>
+			<div class="resource-panel__kills">{{ t('hud.combat.kills', { count: monsterKills }) }}</div>
 			<div v-if="choppingProgress > 0" class="resource-panel__progress">
 				<div
 					class="resource-panel__progress-bar"
@@ -135,11 +136,13 @@ const sceneContainer = ref<HTMLDivElement | null>(null)
 const minimapCanvas = ref<HTMLCanvasElement | null>(null)
 const choppingProgress = ref(0)
 const woodCount = ref(0)
+const monsterKills = ref(0)
 const currentDay = ref(1)
 const playerAlive = ref(true)
 const gameOver = ref(false)
 const lowWoodWarning = ref(false)
 const woodPerDay = DAY_CYCLE_CONFIG.woodConsumedPerDay
+const PLAYER_ATTACK_DAMAGE = 17
 const cameraMode = ref<'follow' | 'free'>('follow')
 const choppingHint = computed(() => {
 	if (gameOver.value) return t('hud.gameOver')
@@ -425,6 +428,42 @@ function plantTreeAtPosition(position: PlanePoint) {
 	spawnTreeVisual(newTree)
 }
 
+// 玩家攻击怪物回调：减少怪物的 health，归零则计入击杀并从场景中移除
+function handlePlayerAttack(monsterId: string, damage: number) {
+	const index = monsterAgents.findIndex(agent => agent.resource.id === monsterId)
+	if (index < 0) return
+	const agent = monsterAgents[index]
+	agent.resource.health -= damage
+	if (agent.resource.health <= 0) {
+		monsterKills.value += 1
+		disposeMonster(monsterId)
+	}
+}
+
+// 从场景、动画控制器、Agent 列表中移除死亡怪物并释放资源
+function disposeMonster(monsterId: string) {
+	const obj = monsterObjects.get(monsterId)
+	if (obj) {
+		obj.removeFromParent()
+		obj.traverse(child => {
+			if (child instanceof Mesh) {
+				child.geometry?.dispose()
+				const materials = Array.isArray(child.material) ? child.material : [child.material]
+				materials.forEach(material => {
+					for (const value of Object.values(material)) {
+						if (value instanceof Texture) value.dispose()
+					}
+					material.dispose()
+				})
+			}
+		})
+		monsterObjects.delete(monsterId)
+	}
+	monsterAnimations.delete(monsterId)
+	const idx = monsterAgents.findIndex(agent => agent.resource.id === monsterId)
+	if (idx >= 0) monsterAgents.splice(idx, 1)
+}
+
 // 生成树的视觉对象（从 spawnTreeInstances 和 spawnNewTree 中抽取的公共逻辑）
 function spawnTreeVisual(tree: TreeResource) {
 	const template = liveTreeTemplates.get(tree.modelIndex)
@@ -451,17 +490,24 @@ function createPlayer(targetScene: Scene) {
 		speed: PLAYER_CONFIG.walkSpeedMetersPerSecond,
 		collectRadius: PLAYER_CONFIG.collectTreeRadiusMeters,
 		chopDurationMs: PLAYER_CONFIG.chopTreeDurationMs,
+		attackRangeMeters: PLAYER_CONFIG.attackRangeMeters,
+		attackDamageMs: PLAYER_CONFIG.attackDamageMs,
+		attackCooldownMs: PLAYER_CONFIG.attackCooldownMs,
+		playerAttackDamage: PLAYER_ATTACK_DAMAGE,
+		onAttackMonster: (monsterId, damage) => handlePlayerAttack(monsterId, damage),
 		worldRadius: WORLD_RADIUS,
 		collisionCheck: pos => checkCollision(pos),
 		treeResources: () => treeResources,
 		threatSources: () => monsterAgents
-			.filter(agent => agent.state === 'chase' || agent.state === 'attack')
+			.filter(agent => agent.state === 'chase' || agent.state === 'attack' || agent.state === 'hit')
 			.map(agent => ({
+				id: agent.resource.id,
 				position: agent.position,
 				homePosition: agent.resource.homePosition,
 				activityRadius: agent.resource.activityRadius,
 				speed: agent.resource.speed,
 				attackRadius: MONSTER_CONFIG.attackRadius,
+				attackDamage: MONSTER_CONFIG.attackDamage,
 			})),
 	})
 
@@ -557,8 +603,10 @@ function updateMonsters(delta: number, now: number) {
 	const monsterContext: MonsterUpdateContext = {
 		playerPosition: playerAgent.position,
 		playerAlive: playerAgent.playerAlive,
-		playerIsChopping: playerAgent.state === 'chopping',
+		playerIsChopping: playerAgent.state === 'chopping' || playerAgent.state === 'attacking',
 		playerIsFleeing: playerAgent.state === 'fleeing',
+		playerAttackRange: PLAYER_CONFIG.attackRangeMeters,
+		playerAttackDamage: PLAYER_ATTACK_DAMAGE,
 		onAttackPlayer: () => {
 			// 怪物攻击：偷走玩家的木头
 			if (!playerAgent) return
@@ -1014,6 +1062,15 @@ function disposeScene() {
 	font-weight: 700;
 	color: #ff4444;
 	animation: warning-pulse 1s ease-in-out infinite;
+}
+
+.resource-panel__kills {
+	margin-top: 6px;
+	font-size: 12px;
+	font-weight: 600;
+	opacity: 0.85;
+	color: #ff8c00;
+	letter-spacing: 0.02em;
 }
 
 .resource-panel__progress {

@@ -17,9 +17,10 @@ export type MonsterResource = {
 	attackDamage: number
 	attackCooldownMs: number
 	activityRadius: number
+	hitStunMs: number
 }
 
-export type MonsterAgentState = 'idle' | 'patrol' | 'tendPlants' | 'chase' | 'attack' | 'death'
+export type MonsterAgentState = 'idle' | 'patrol' | 'tendPlants' | 'chase' | 'attack' | 'hit' | 'death'
 
 export type MonsterUpdateContext = {
 	playerPosition: PlanePoint
@@ -27,6 +28,8 @@ export type MonsterUpdateContext = {
 	playerIsChopping: boolean
 	playerIsFleeing: boolean
 	onAttackPlayer: () => void
+	playerAttackRange?: number
+	playerAttackDamage?: number
 }
 
 export type MonsterAgent = {
@@ -38,6 +41,7 @@ export type MonsterAgent = {
 	animation: string
 	lastAttackTime: number
 	stateTimer: number
+	hitTimer: number
 	tendTarget: PlanePoint | null
 	tendTimer: number
 	plantCallback: ((position: PlanePoint) => void) | null
@@ -60,6 +64,7 @@ type MonsterConfig = {
 	attackCooldownMs: number
 	activityRadius: number
 	modelScale: number
+	hitStunMs: number
 }
 
 function seededRandom(seed: number) {
@@ -100,6 +105,7 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 			attackDamage: config.attackDamage,
 			attackCooldownMs: config.attackCooldownMs,
 			activityRadius: config.activityRadius * (0.85 + rand() * 0.3),
+			hitStunMs: config.hitStunMs,
 		})
 	}
 
@@ -119,6 +125,7 @@ export function createMonsterAgent(
 		animation: 'idle',
 		lastAttackTime: 0,
 		stateTimer: 0,
+		hitTimer: 0,
 		tendTarget: null,
 		tendTimer: 0,
 		plantCallback: plantCallback ?? null,
@@ -156,6 +163,9 @@ export function createMonsterAgent(
 					break
 				case 'attack':
 					updateAttack(this, delta, now, distToPlayer, context)
+					break
+				case 'hit':
+					updateHit(this, delta, now, distToPlayer, playerDistanceFromHome, context)
 					break
 			}
 		},
@@ -285,6 +295,8 @@ function updateChase(
 		return
 	}
 
+	if (tryReceivePlayerHit(agent, now, distToPlayer, context)) return
+
 	agent.target = [...context.playerPosition]
 	moveToward(agent, delta)
 	agent.bearing = faceTarget(agent, context.playerPosition)
@@ -331,10 +343,93 @@ function updateAttack(
 		return
 	}
 
+	// 玩家先手击中怪物 → 进入 hit 硬直
+	if (tryReceivePlayerHit(agent, now, distToPlayer, context)) return
+
 	// 攻击冷却到期 → 命中
 	if (now - agent.lastAttackTime >= agent.resource.attackCooldownMs) {
 		context.onAttackPlayer()
 		agent.lastAttackTime = now
+	}
+}
+
+export function canReceivePlayerHit(
+	range: number,
+	damage: number,
+	distToPlayer: number,
+	now: number,
+	agent: MonsterAgent,
+): boolean {
+	if (range <= 0) return false
+	if (damage <= 0) return false
+	if (!isWithinAttackReach(distToPlayer, range)) return false
+	if (now - agent.lastAttackTime < agent.resource.attackCooldownMs) return false
+	return true
+}
+
+export function isWithinAttackReach(distToPlayer: number, range: number): boolean {
+	if (distToPlayer > range) return false
+	return true
+}
+
+// ===== 尝试接受玩家的攻击（被击中则切到 hit 状态） =====
+function tryReceivePlayerHit(
+	agent: MonsterAgent,
+	now: number,
+	distToPlayer: number,
+	context: MonsterUpdateContext,
+): boolean {
+	const range = context.playerAttackRange ?? 0
+	const damage = context.playerAttackDamage ?? 0
+	if (!canReceivePlayerHit(range, damage, distToPlayer, now, agent)) return false
+
+	agent.resource.health -= damage
+	agent.lastAttackTime = now
+
+	if (agent.resource.health <= 0) {
+		agent.state = 'death'
+		agent.animation = 'death'
+		agent.hitTimer = 0
+		return true
+	}
+
+	agent.state = 'hit'
+	agent.animation = 'hit'
+	agent.hitTimer = 0
+	agent.target = [...context.playerPosition]
+	return true
+}
+
+// ===== hit：被玩家击中后硬直，计时结束后重新进入战斗或休闲 =====
+function updateHit(
+	agent: MonsterAgent,
+	delta: number,
+	now: number,
+	distToPlayer: number,
+	playerDistanceFromHome: number,
+	context: MonsterUpdateContext,
+) {
+	agent.hitTimer += delta * 1000
+	agent.bearing = faceTarget(agent, context.playerPosition)
+	agent.animation = 'hit'
+
+	if (agent.hitTimer < agent.resource.hitStunMs) return
+
+	agent.hitTimer = 0
+	if (
+		context.playerAlive
+		&& (context.playerIsChopping || context.playerIsFleeing)
+		&& distToPlayer < MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius
+		&& playerDistanceFromHome <= agent.resource.activityRadius
+	) {
+		agent.state = 'chase'
+		agent.animation = 'run'
+		agent.target = [...context.playerPosition]
+	} else {
+		agent.state = 'idle'
+		agent.animation = 'idle'
+		agent.stateTimer = 0
+		agent.target = pickPatrolTarget(agent)
 	}
 }
 

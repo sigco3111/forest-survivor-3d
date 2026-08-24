@@ -7,6 +7,9 @@ export const PLAYER_CONFIG = {
   walkSpeedMetersPerSecond: 24, // 基础速度：24 单位/秒
   collectTreeRadiusMeters: 18, // 玩家与树的距离 ≤ 18 时触发砍树
   chopTreeDurationMs: 2800,
+  attackRangeMeters: 20, // 玩家攻击怪物的距离
+  attackDamageMs: 600, // 攻击挥砍动画耗时（毫秒）
+  attackCooldownMs: 1500, // 攻击之间的冷却时间（毫秒）
 };
 
 // 树资源配置：使用确定性噪声生成，采集后枯树淡出并在随机位置重生。
@@ -85,4 +88,5 @@ export const MONSTER_CONFIG = {
   health: 100,
   attackDamage: 10,
   attackCooldownMs: 1500,
+  hitStunMs: 700, // 怪物被玩家击中后的硬直时间（毫秒）
 };

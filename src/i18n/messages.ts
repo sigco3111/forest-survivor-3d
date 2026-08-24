@@ -18,6 +18,10 @@ export const messages = {
 			gameOver: 'Game over',
 			chopping: 'Chopping {progress}%',
 			approachTree: 'Approach a tree to start chopping',
+			combat: {
+				kills: 'Monsters killed: {count}',
+				attacking: 'Attacking {progress}%',
+			},
 		},
 		camera: {
 			free: 'Switch to free camera',
@@ -49,6 +53,10 @@ export const messages = {
 			gameOver: '游戏结束',
 			chopping: '伐木中 {progress}%',
 			approachTree: '靠近树木开始伐木',
+			combat: {
+				kills: '已击杀怪物：{count}',
+				attacking: '攻击中 {progress}%',
+			},
 		},
 		camera: {
 			free: '切换自由视角',
@@ -80,6 +88,10 @@ export const messages = {
 			gameOver: '게임 오버',
 			chopping: '벌목 중 {progress}%',
 			approachTree: '나무에 다가가면 벌목을 시작합니다',
+			combat: {
+				kills: '처치한 몬스터: {count}',
+				attacking: '공격 중 {progress}%',
+			},
 		},
 		camera: {
 			free: '자유 시점으로 전환',

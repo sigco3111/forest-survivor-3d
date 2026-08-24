@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  canReceivePlayerHit,
   createMonsterAgent,
   createMonsterResources,
+  isWithinAttackReach,
   type MonsterResource,
   type MonsterUpdateContext,
 } from '../../src/game/resources/monsters'
@@ -24,6 +26,7 @@ function makeResource(overrides: Partial<MonsterResource> = {}): MonsterResource
     attackDamage: 10,
     attackCooldownMs: 1_500,
     activityRadius: 200,
+    hitStunMs: 700,
     ...overrides,
   }
 }
@@ -56,6 +59,7 @@ describe('monster resources', () => {
       attackCooldownMs: 1_500,
       activityRadius: 170,
       modelScale: 6,
+      hitStunMs: 700,
     }
 
     const first = createMonsterResources(config)
@@ -82,6 +86,7 @@ describe('monster resources', () => {
       attackCooldownMs: 100,
       activityRadius: 30,
       modelScale: 1,
+      hitStunMs: 700,
     })
 
     expect(resources.some(resource => resource.modelIndex === 6 && resource.modelName === 'Demon')).toBe(true)
@@ -276,5 +281,242 @@ describe('monster agent', () => {
       agent.update(0, 0, context)
       expect(agent.state).toBe('idle')
     }
+  })
+
+  it('decrements health and enters hit state when player is inside playerAttackRange', () => {
+    const context = makeContext({
+      playerAttackRange: 25,
+      playerAttackDamage: 17,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    agent.update(0, 1_000, context)
+
+    expect(resource.health).toBe(83)
+    expect(agent.state).toBe('hit')
+    expect(agent.animation).toBe('hit')
+    expect(agent.hitTimer).toBe(0)
+  })
+
+  it('exits hit state back to chase after hitStunMs when player is still chopping', () => {
+    const context = makeContext({
+      playerAttackRange: 25,
+      playerAttackDamage: 17,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+    agent.update(0, 1_000, context)
+    expect(agent.state).toBe('hit')
+
+    agent.update(0.71, 1_500, context)
+    expect(agent.state).toBe('chase')
+    expect(agent.animation).toBe('run')
+  })
+
+  it('transitions directly to death when health reaches zero after a hit', () => {
+    const context = makeContext({
+      playerAttackRange: 25,
+      playerAttackDamage: 17,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({ health: 17, attackCooldownMs: 1_000 })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    agent.update(0, 1_000, context)
+    expect(resource.health).toBe(0)
+    expect(agent.state).toBe('death')
+    expect(agent.animation).toBe('death')
+
+    agent.update(0.5, 1_500, context)
+    expect(agent.state).toBe('death')
+  })
+
+  it('does not decrement health when playerAttackRange is zero (existing behavior preserved)', () => {
+    const context = makeContext({ playerIsChopping: true })
+    const resource = makeResource({ health: 100, attackCooldownMs: 1_000 })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    agent.update(0, 1_000, context)
+    expect(resource.health).toBe(100)
+    expect(agent.state).toBe('attack')
+  })
+
+  it('returns from hit to idle when the player is no longer attacking or fleeing', () => {
+    // 먼저 hit 상태로 진입 (player chopping)
+    const hitContext = makeContext({
+      playerAttackRange: 25,
+      playerAttackDamage: 17,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+    agent.update(0, 1_000, hitContext)
+    expect(agent.state).toBe('hit')
+
+    // 이후 player chopping 중단 → hit 끝나면 idle
+    const idleContext = makeContext({
+      playerAttackRange: 25,
+      playerAttackDamage: 17,
+      playerIsChopping: false,
+      playerIsFleeing: false,
+    })
+    agent.update(0.71, 1_500, idleContext)
+    expect(agent.state).toBe('idle')
+    expect(agent.animation).toBe('idle')
+  })
+
+  it('decrements health and enters hit during chase when playerAttackRange is reached', () => {
+    const context = makeContext({
+      playerAttackRange: 25,
+      playerAttackDamage: 17,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'chase'
+
+    agent.update(0, 1_000, context)
+    expect(resource.health).toBe(83)
+    expect(agent.state).toBe('hit')
+  })
+
+  it('tryReceivePlayerHit returns false when playerAttackDamage is zero', () => {
+    const context = makeContext({
+      playerAttackRange: 25,
+      playerAttackDamage: 0,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    agent.update(0, 1_000, context)
+    expect(resource.health).toBe(100)
+    expect(agent.state).toBe('attack')
+  })
+
+  it('tryReceivePlayerHit returns false when playerAttackRange is zero (range guard)', () => {
+    const context = makeContext({
+      playerAttackRange: 0,
+      playerAttackDamage: 17,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    agent.update(0, 1_000, context)
+    expect(resource.health).toBe(100)
+    expect(agent.state).toBe('attack')
+  })
+
+  it('tryReceivePlayerHit returns false when playerAttackDamage is zero (damage guard)', () => {
+    const context = makeContext({
+      playerAttackRange: 25,
+      playerAttackDamage: 0,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    agent.update(0, 1_000, context)
+    expect(resource.health).toBe(100)
+    expect(agent.state).toBe('attack')
+  })
+
+  it('tryReceivePlayerHit returns false when player is outside playerAttackRange (distance guard)', () => {
+    // playerAttackRange=5, player position [50,0] (기본 distToPlayer>5)
+    // activityRadius=200 안에, attackRadius 작게 → chase 가지 안 빠짐
+    const context = makeContext({
+      playerPosition: [50, 0],
+      playerAttackRange: 5,
+      playerAttackDamage: 17,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({
+      health: 100,
+      attackCooldownMs: 1_000,
+      position: [0, 0],
+      homePosition: [0, 0],
+      activityRadius: 200,
+    })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    agent.update(0, 1_000, context)
+    expect(resource.health).toBe(100)
+  })
+
+  it('isWithinAttackReach and canReceivePlayerHit cover all guard branches', () => {
+    const resource = makeResource({ attackCooldownMs: 1_000 })
+    const agent = createMonsterAgent(resource)
+    // distance 안 → true
+    expect(isWithinAttackReach(5, 10)).toBe(true)
+    // distance 밖 → false
+    expect(isWithinAttackReach(15, 10)).toBe(false)
+    // range=0 → false
+    expect(canReceivePlayerHit(0, 17, 5, 0, agent)).toBe(false)
+    // damage=0 → false
+    expect(canReceivePlayerHit(10, 0, 5, 0, agent)).toBe(false)
+    // distance 밖 → false
+    expect(canReceivePlayerHit(10, 17, 15, 0, agent)).toBe(false)
+    // 쿨다운 중 → false
+    expect(canReceivePlayerHit(10, 17, 5, 500, agent)).toBe(false)
+    // 모든 조건 통과 → true
+    expect(canReceivePlayerHit(10, 17, 5, 1_500, agent)).toBe(true)
+  })
+
+  it('updateHit timer accumulates across frames until stun expires (timer branch)', () => {
+    const context = makeContext({
+      playerAttackRange: 25,
+      playerAttackDamage: 17,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({ health: 100, attackCooldownMs: 1_000, hitStunMs: 700, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+    agent.update(0, 1_000, context)
+    expect(agent.state).toBe('hit')
+
+    // 아직 stun 中 → hit 유지
+    agent.update(0.3, 1_300, context)
+    expect(agent.state).toBe('hit')
+    // stun 끝 → 다음 상태로
+    agent.update(0.5, 1_800, context)
+    expect(agent.state).not.toBe('hit')
+  })
+
+  it('tryReceivePlayerHit respects attackCooldownMs', () => {
+    const context = makeContext({
+      playerAttackRange: 25,
+      playerAttackDamage: 17,
+      playerIsChopping: true,
+    })
+    const resource = makeResource({ health: 200, attackCooldownMs: 1_000, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    agent.update(0, 1_000, context)
+    expect(agent.state).toBe('hit')
+    expect(resource.health).toBe(183)
+    // 쿨다운 중 → 공격 무시
+    agent.state = 'attack'
+    agent.lastAttackTime = 1_000
+    agent.update(0, 1_500, context)
+    expect(resource.health).toBe(183)
+    expect(agent.state).toBe('attack')
+    // 쿨다운 지난 후 다시
+    agent.update(0, 2_100, context)
+    expect(resource.health).toBe(166)
+    expect(agent.state).toBe('hit')
   })
 })
