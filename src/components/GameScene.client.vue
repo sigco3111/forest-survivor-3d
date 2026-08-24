@@ -2,8 +2,9 @@
 	<div class="game-stage">
 		<div ref="sceneContainer" class="scene-container"></div>
 		<div class="language-switcher" role="group" :aria-label="t('language.label')">
-			<button type="button" :class="{ active: locale === 'en' }" @click="changeLocale('en')">English</button>
-			<button type="button" :class="{ active: locale === 'zh-CN' }" @click="changeLocale('zh-CN')">简体中文</button>
+			<button type="button" :class="{ active: locale === 'en' }" @click="changeLocale('en')">{{ t('language.english') }}</button>
+			<button type="button" :class="{ active: locale === 'zh-CN' }" @click="changeLocale('zh-CN')">{{ t('language.chinese') }}</button>
+			<button type="button" :class="{ active: locale === 'ko' }" @click="changeLocale('ko')">{{ t('language.korean') }}</button>
 		</div>
 		<div class="resource-panel">
 			<div class="resource-panel__day">{{ t('hud.day', { day: currentDay }) }}</div>
@@ -299,7 +300,7 @@ function createTrees(targetScene: Scene) {
 				spawnTreeInstances(template, modelIndex)
 			},
 			undefined,
-			error => console.error(`树模型加载失败：${modelUrl}`, error),
+			error => console.error(`나무 모델 로드 실패: ${modelUrl}`, error),
 		)
 	})
 
@@ -310,7 +311,7 @@ function createTrees(targetScene: Scene) {
 				deadTreeTemplates.set(modelIndex, normalizeModel(gltf.scene))
 			},
 			undefined,
-			error => console.error(`枯树模型加载失败：${modelUrl}`, error),
+			error => console.error(`마른나무 모델 로드 실패: ${modelUrl}`, error),
 		)
 	})
 }
@@ -363,7 +364,7 @@ function createEnvObjects(targetScene: Scene) {
 					})
 			},
 			undefined,
-			error => console.error(`环境模型加载失败：${url}`, error),
+			error => console.error(`환경 모델 로드 실패: ${url}`, error),
 		)
 	})
 }
@@ -400,7 +401,7 @@ function createMonsters(targetScene: Scene) {
 				}))
 			},
 			undefined,
-			error => console.error(`怪物模型加载失败：${modelUrl}`, error),
+			error => console.error(`몬스터 모델 로드 실패: ${modelUrl}`, error),
 		)
 	})
 }
@@ -475,7 +476,7 @@ function createPlayer(targetScene: Scene) {
 		},
 		undefined,
 		error => {
-			console.error('玩家模型加载失败:', error)
+			console.error('플레이어 모델 로드 실패:', error);
 		},
 	)
 }

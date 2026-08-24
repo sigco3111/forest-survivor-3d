@@ -8,6 +8,7 @@ export default defineNuxtConfig({
 		locales: [
 			{ code: 'en', language: 'en' },
 			{ code: 'zh-CN', language: 'zh-CN' },
+			{ code: 'ko', language: 'ko' },
 		],
 		strategy: 'no_prefix',
 		detectBrowserLanguage: false,

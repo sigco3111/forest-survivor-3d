@@ -8,6 +8,7 @@ export const messages = {
 			label: 'Language',
 			english: 'English',
 			chinese: '简体中文',
+			korean: '한국어',
 		},
 		hud: {
 			day: 'Day {day}',
@@ -38,6 +39,7 @@ export const messages = {
 			label: '语言',
 			english: 'English',
 			chinese: '简体中文',
+			korean: '한국어',
 		},
 		hud: {
 			day: '第 {day} 天',
@@ -57,6 +59,37 @@ export const messages = {
 			survived: '你存活了 {days} 天',
 			exhausted: '木材耗尽，你在寒夜中倒下。',
 			restart: '重新开始',
+		},
+	},
+	ko: {
+		meta: {
+			title: '숲의 생존자 3D',
+			description: '차가운 밤이 오기 전에 충분한 나무를 모아 숲에서 살아남으세요.',
+		},
+		language: {
+			label: '언어',
+			english: 'English',
+			chinese: '简体中文',
+			korean: '한국어',
+		},
+		hud: {
+			day: '{day}일차',
+			wood: '나무',
+			dailyUse: '매일 소모 -{count} 나무',
+			lowWood: '나무 부족!',
+			gameOver: '게임 오버',
+			chopping: '벌목 중 {progress}%',
+			approachTree: '나무에 다가가면 벌목을 시작합니다',
+		},
+		camera: {
+			free: '자유 시점으로 전환',
+			follow: '따라가기 시점으로 전환',
+		},
+		gameOver: {
+			title: '게임 오버',
+			survived: '{days}일 동안 살아남았습니다',
+			exhausted: '나무가 떨어진 채로 추운 밤을 버티지 못하고 쓰러졌습니다.',
+			restart: '다시 시작',
 		},
 	},
 } as const
