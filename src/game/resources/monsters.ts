@@ -419,11 +419,14 @@ function updateChase(
 		return
 	}
 
-	// 玩家超出警觉范围 → 放弃追击
+	// 玩家超出警觉范围 → 放弃追击 (보스는 예외 — 세계 끝까지 추격)
 	if (
-		distToPlayer > effectiveDetectionRadius(context) * 1.5
-		|| distanceTo(agent.position, agent.resource.homePosition) > agent.resource.activityRadius
-		|| distanceTo(context.playerPosition, agent.resource.homePosition) > agent.resource.activityRadius
+		!agent.resource.isBoss
+		&& (
+			distToPlayer > effectiveDetectionRadius(context) * 1.5
+			|| distanceTo(agent.position, agent.resource.homePosition) > agent.resource.activityRadius
+			|| distanceTo(context.playerPosition, agent.resource.homePosition) > agent.resource.activityRadius
+		)
 	) {
 		agent.state = 'idle'
 		agent.animation = 'idle'
@@ -465,11 +468,14 @@ function updateAttack(
 		return
 	}
 
-	// 玩家超出攻击范围 → 继续追击
+	// 玩家超出攻击范围 → 继续追击 (보스는 예외 — 활동 반경 밖에서도 계속 쫓는다)
 	if (distToPlayer > 30) {
 		if (
-			distanceTo(agent.position, agent.resource.homePosition) > agent.resource.activityRadius
-			|| distanceTo(context.playerPosition, agent.resource.homePosition) > agent.resource.activityRadius
+			!agent.resource.isBoss
+			&& (
+				distanceTo(agent.position, agent.resource.homePosition) > agent.resource.activityRadius
+				|| distanceTo(context.playerPosition, agent.resource.homePosition) > agent.resource.activityRadius
+			)
 		) {
 			agent.state = 'idle'
 			agent.animation = 'idle'
@@ -542,9 +548,11 @@ function canChasePlayer(
 	context: MonsterUpdateContext,
 	now: number,
 ): boolean {
-	const engaged = context.playerIsChopping || now < agent.provokedUntil || agent.resource.isBoss
-	return context.playerAlive
-		&& engaged
+	if (!context.playerAlive) return false
+	// 보스는 언제 어디서든 플레이어를 추격한다 (탐지 반경/활동 반경 무시)
+	if (agent.resource.isBoss) return true
+	const engaged = context.playerIsChopping || now < agent.provokedUntil
+	return engaged
 		&& distToPlayer < effectiveDetectionRadius(context)
 		&& playerDistanceFromHome <= agent.resource.activityRadius
 }

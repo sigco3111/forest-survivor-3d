@@ -189,6 +189,28 @@ describe('monster resources', () => {
     agent.update(0, 0, makeContext({ playerIsChopping: false }))
     expect(agent.state).toBe('chase')
 
+    // 보스는 거리/활동 반경을 무시하고 세계 끝에서도 플레이어를 추격한다
+    const farBoss = createMonsterAgent(makeResource({
+      isBoss: true,
+      modelName: 'Giant',
+      activityRadius: 50,
+      homePosition: [0, 0],
+      speed: 100,
+    }))
+    farBoss.update(0.5, 0, makeContext({ playerPosition: [500, 0], playerIsChopping: false }))
+    expect(farBoss.state).toBe('chase')
+    // 첫 업데이트는 전환만, 다음 프레임에 플레이어를 향해 이동
+    farBoss.update(0.5, 0, makeContext({ playerPosition: [500, 0], playerIsChopping: false }))
+    expect(farBoss.position[0]).toBeGreaterThan(0) // 플레이어를 향해 이동
+
+    // 추격 중 범위를 벗어나도 포기하지 않는다 (일반 몬스터는 포기)
+    farBoss.update(0, 100, makeContext({ playerPosition: [900, 0], playerIsChopping: false }))
+    expect(farBoss.state).toBe('chase')
+    const normalFar = createMonsterAgent(makeResource({ activityRadius: 50 }))
+    normalFar.state = 'chase'
+    normalFar.update(0, 100, makeContext({ playerPosition: [900, 0], playerIsChopping: true }))
+    expect(normalFar.state).toBe('idle')
+
     // 일반 몬스터는 여전히 벌목 중일 때만 추격
     const normal = createMonsterAgent(makeResource())
     normal.update(0, 0, makeContext({ playerIsChopping: false }))

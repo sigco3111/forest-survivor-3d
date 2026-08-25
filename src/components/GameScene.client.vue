@@ -112,7 +112,7 @@
 			<div class="player-status__line player-status__line--prey">{{ status.preyLine || t('hud.status.none') }}</div>
 		</div>
 		<div v-if="bossBar" class="boss-bar">
-			<div class="boss-bar__name">{{ bossBar.name }}</div>
+			<div class="boss-bar__name">{{ bossBar.name }} · {{ bossBar.distance }}m</div>
 			<div class="boss-bar__track">
 				<div class="boss-bar__fill" :style="{ width: `${bossBar.percent}%` }"></div>
 			</div>
@@ -764,7 +764,7 @@ function processRespawns() {
 
 // ===== 보스: bossIntervalDays마다 스폰, 상시 추격, 전용 HP바 =====
 const activeBossId = ref<string | null>(null)
-const bossBar = ref<{ name: string; percent: number } | null>(null)
+const bossBar = ref<{ name: string; distance: number; percent: number } | null>(null)
 
 function spawnBoss(dayNumber: number) {
 	if (!scene) return
@@ -778,7 +778,7 @@ function spawnBoss(dayNumber: number) {
 
 function updateBossBar() {
 	const id = activeBossId.value
-	if (!id) {
+	if (!id || !playerAgent) {
 		bossBar.value = null
 		return
 	}
@@ -787,8 +787,13 @@ function updateBossBar() {
 		bossBar.value = null
 		return
 	}
+	const distance = Math.round(Math.hypot(
+		agent.position[0] - playerAgent.position[0],
+		agent.position[1] - playerAgent.position[1],
+	))
 	bossBar.value = {
 		name: agent.resource.modelName,
+		distance,
 		percent: Math.max(0, Math.round((agent.resource.health / agent.resource.maxHealth) * 100)),
 	}
 }
@@ -1417,6 +1422,17 @@ function drawMinimap() {
 	// 怪物：看管者模式，用橙色显示
 	for (const agent of monsterAgents) {
 		if (agent.resource.health <= 0) continue
+		// 보스는 핑크 마커로 위치를 항상 추적 가능하게
+		if (agent.resource.isBoss) {
+			ctx.fillStyle = '#ff6bd6'
+			ctx.beginPath()
+			ctx.arc(toX(agent.position[0]), toY(agent.position[1]), 5, 0, Math.PI * 2)
+			ctx.fill()
+			ctx.strokeStyle = '#ffffff'
+			ctx.lineWidth = 1.5
+			ctx.stroke()
+			continue
+		}
 		// 种植中的怪物用绿色，其他用橙色
 		ctx.fillStyle = agent.state === 'tendPlants' ? '#2ecc71' : '#ff8c00'
 		ctx.beginPath()
