@@ -99,6 +99,44 @@ export const DAY_CYCLE_CONFIG = {
   woodConsumedPerDay: 5,       // 每天消耗 5 木头
 }
 
+// ===== Tier 1: 레벨업 자동 카드 3택 =====
+// 매 레벨업마다 풀에서 후보 3장을 결정론 추출하고, preset 친화도와 카드 가중치 곱으로
+// 가장 점수 높은 카드를 자동 채택한다 (관전자가 빌드 방향을 읽을 수 있도록).
+export const LEVEL_UP_CONFIG = {
+  cardCount: 3,
+  // 카드 풀. effects 값들은 모두 "config 단위" 보너스.
+  pool: [
+    { id: 'attack', pickWeight: 1.0, effects: { attackBonus: 5 } },
+    { id: 'health', pickWeight: 1.0, effects: { healthBonus: 30 } },
+    { id: 'speed',  pickWeight: 0.8, effects: { speedBonus: 1 } },
+    { id: 'crit',   pickWeight: 0.6, effects: { critChanceBonus: 0.04 } },
+    { id: 'regen',  pickWeight: 0.6, effects: { regenBonus: 1 } },
+    { id: 'scan',   pickWeight: 0.8, effects: { scanBonus: 12 } },
+  ],
+  // 성향 친화도: 카드 점수 = pickWeight × affinity. 1.0 = 중립.
+  presetAffinity: {
+    aggressive: { attack: 1.6, health: 0.7, speed: 1.3, crit: 1.5, regen: 0.6, scan: 1.3 },
+    balanced:   { attack: 1.0, health: 1.0, speed: 1.0, crit: 1.0, regen: 1.0, scan: 1.0 },
+    survivor:   { attack: 0.7, health: 1.5, speed: 0.8, crit: 0.8, regen: 1.4, scan: 0.8 },
+  },
+}
+
+// ===== Tier 1: 종족 숙련도 카운터 =====
+// 같은 종족을 일정 수만큼 처치하면 영구 보너스가 누적된다. 카운터 자체는 런 한정.
+export const MASTERY_CONFIG = {
+  thresholds: [
+    { count: 5,  bonus: { scanBonus: 15 } },
+    { count: 15, bonus: { critChanceBonus: 0.03 } },
+    { count: 30, bonus: { attackBonus: 3 } },
+    { count: 50, bonus: { damageTakenMultiplier: 0.92 } },
+  ],
+  bossThresholds: [
+    { count: 1, bonus: { critMultiplierBonus: 0.3 } },
+    { count: 3, bonus: { scanBonus: 25 } },
+    { count: 5, bonus: { damageTakenMultiplier: 0.9 } },
+  ],
+}
+
 // 전투 성향 설정: 플레이어가 자신보다 약한 적을 선제공격하는 호전성 튜닝.
 // 전투력 비교: playerPower = playerBasePower + wood × powerPerWood
 //             threatStrength = health × monsterHealthPowerWeight + attackDamage × monsterAttackPowerWeight

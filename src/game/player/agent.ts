@@ -4,6 +4,7 @@ import {
 	type PlanePoint,
 	type TreeResource,
 } from '../resources/trees'
+import { applyCardEffects, rollLevelUp, type LevelUpPool, type PresetAffinity } from './level-up-cards'
 
 export type PlayerAgentState = 'exploring' | 'approaching' | 'chopping' | 'fleeing' | 'attacking' | 'hunting'
 
@@ -108,6 +109,10 @@ export type PlayerAgentConfig = {
 	huntAggroRangeMultiplier: number  // 선제공격 스캔 범위 배율 (attackRangeMeters × 배율)
 	huntGiveUpRangeMultiplier: number // 추격 포기 범위 배율 (attackRangeMeters × 배율)
 	presetWeights?: PresetWeights     // 성향 프리셋 가중치 (미지정 = 균형)
+	/** 카드 기반 레벨업 풀 (미지정 시 기존 levelXxxBonus 자동 적용) */
+	levelUpPool?: LevelUpPool
+	/** 풀에서 카드를 자동 채택할 때 쓰는 성향별 친화도. 미지정 시 균형 1.0 */
+	levelUpAffinity?: PresetAffinity
 	worldRadius: number           // 世界半径
 	collisionCheck: (position: PlanePoint) => boolean
 	treeResources: () => TreeResource[]
@@ -149,6 +154,20 @@ export type PlayerAgent = {
 	regenTimer: number
 	avoidedAreas: AvoidedArea[]
 	failedAreaAttempt: FailedAreaAttempt | null
+	/** 크리티컬 확률 (0..1). 카드/숙련도로 누적. */
+	critChance: number
+	/** 크리티컬 배율 (예: 1.5 = 150% 피해). 카드/숙련도로 누적. */
+	critMultiplier: number
+	/** 받는 피해 배율 (숙련도로 곱셈 — 1 미만이면 감소, 1 초과면 증가). */
+	damageTakenMultiplier: number
+	/** 카드/숙련도로 누적된 비전투 회복 보너스 (preset regenBonus와 별개). */
+	extraRegenBonus: number
+	/** 카드/숙련도로 누적된 스캔 범위 보너스 (레벨당 가산). */
+	extraScanRangePerLevel: number
+	/** 이번 프레임에 일어난 레벨업 결과 큐. GameScene가 HUD 표시 후 비운다. */
+	pendingLevelUps: { chosenId: string; effects: Record<string, number> }[]
+	/** 마지막으로 처리한 레벨업 결과 (마지막 카드 한 장 — HUD 단일 카드용). */
+	lastLevelUpChoice: { id: string; effects: Record<string, number> } | null
 
 	update(delta: number, now: number): void
 	/** 피해를 입힌다. 체력이 0이 되면 playerAlive = false (사망). */
@@ -163,6 +182,14 @@ export type PlayerAgent = {
 	upgradeWeapon(): boolean
 	/** 생명 흡수: 해준 피해의 일부를 회복한다 (해금 레벨 이상일 때). */
 	applyLifeLeech(damageDealt: number): void
+	/** 숙련도 보너스를 누적 반영한다. 0인 필드는 건너뛴다. */
+	applyMasteryBonus(bonus: {
+		critChanceBonus?: number
+		critMultiplierBonus?: number
+		scanRangeBonus?: number
+		attackBonus?: number
+		damageTakenMultiplier?: number
+	}): void
 }
 
 const AREA_FAILURE_LIMIT = 2
@@ -217,10 +244,18 @@ export function createPlayerAgent(
 		playerAlive: true,
 		regenTimer: 0,
 		avoidedAreas: [],
+		critChance: 0,
+		critMultiplier: 1.5,
+		damageTakenMultiplier: 1,
+		extraRegenBonus: 0,
+		extraScanRangePerLevel: 0,
+		pendingLevelUps: [],
+		lastLevelUpChoice: null,
 		failedAreaAttempt: null,
 
 		applyDamage(amount: number) {
-			this.health = Math.max(0, this.health - amount)
+			const reduced = Math.round(amount * this.damageTakenMultiplier)
+			this.health = Math.max(0, this.health - reduced)
 			if (this.health <= 0) this.playerAlive = false
 		},
 
@@ -232,17 +267,47 @@ export function createPlayerAgent(
 			const weights = weightsOf(config)
 			this.exp += amount
 			let threshold = expForLevel(this.level, config)
+			const pool = config.levelUpPool
 			while (this.exp >= threshold) {
 				this.exp -= threshold
 				this.level += 1
-				// 성향 프리셋 가중치가 적용된 레벨업 보너스 (맹공격 = 공격 위주, 생존가 = 체력/회복 위주)
-				const healthBonus = Math.round(config.levelHealthBonus * weights.healthWeight)
-				this.maxHealth += healthBonus
-				this.health = Math.min(this.maxHealth, this.health + healthBonus)
-				this.attackDamage += Math.round(config.levelAttackBonus * weights.attackWeight)
-				const speedDelta = config.levelSpeedBonus * weights.speedWeight
-				config.speed += speedDelta
-				this.speed += speedDelta
+
+				if (pool) {
+					// 카드 풀 기반: 매 레벨업마다 후보 3장 추출 → 친화도 점수 최대 카드를 자동 채택 → 효과 누적.
+					const result = rollLevelUp(pool, config.levelUpAffinity ?? {
+						attack: 1, health: 1, speed: 1, crit: 1, regen: 1, scan: 1,
+					}, this.level)
+					this.pendingLevelUps.push({
+						chosenId: result.chosen.id,
+						effects: { ...result.chosen.effects },
+					})
+					this.lastLevelUpChoice = {
+						id: result.chosen.id,
+						effects: { ...result.chosen.effects },
+					}
+					const applied = applyCardEffects(result.chosen)
+					if (applied.attackBonus) this.attackDamage += applied.attackBonus
+					if (applied.healthBonus) {
+						this.maxHealth += applied.healthBonus
+						this.health = Math.min(this.maxHealth, this.health + applied.healthBonus)
+					}
+					if (applied.speedBonus) {
+						config.speed += applied.speedBonus
+						this.speed += applied.speedBonus
+					}
+					if (applied.critChanceBonus) this.critChance = Math.min(1, this.critChance + applied.critChanceBonus)
+					if (applied.regenBonus) this.extraRegenBonus += applied.regenBonus
+					if (applied.scanBonus) this.extraScanRangePerLevel += applied.scanBonus
+				} else {
+					// 풀 미설정 시: 기존 동작 (성향 가중치가 곱해진 고정 보너스)
+					const healthBonus = Math.round(config.levelHealthBonus * weights.healthWeight)
+					this.maxHealth += healthBonus
+					this.health = Math.min(this.maxHealth, this.health + healthBonus)
+					this.attackDamage += Math.round(config.levelAttackBonus * weights.attackWeight)
+					const speedDelta = config.levelSpeedBonus * weights.speedWeight
+					config.speed += speedDelta
+					this.speed += speedDelta
+				}
 				threshold = expForLevel(this.level, config)
 			}
 		},
@@ -267,6 +332,14 @@ export function createPlayerAgent(
 			this.health = Math.min(this.maxHealth, this.health + Math.round(damageDealt * config.leechRatio))
 		},
 
+		applyMasteryBonus(bonus) {
+			if (bonus.critChanceBonus) this.critChance = Math.min(1, this.critChance + bonus.critChanceBonus)
+			if (bonus.critMultiplierBonus) this.critMultiplier += bonus.critMultiplierBonus
+			if (bonus.scanRangeBonus) this.extraScanRangePerLevel += bonus.scanRangeBonus
+			if (bonus.attackBonus) this.attackDamage += bonus.attackBonus
+			if (bonus.damageTakenMultiplier) this.damageTakenMultiplier *= bonus.damageTakenMultiplier
+		},
+
 		update(delta, now) {
 			if (!this.playerAlive) return
 			pruneAvoidedAreas(this, now)
@@ -279,7 +352,7 @@ export function createPlayerAgent(
 				this.regenTimer += delta * 1000
 				if (this.regenTimer >= config.regenIntervalMs) {
 					this.regenTimer -= config.regenIntervalMs
-					const regenAmount = config.regenHealthAmount + weightsOf(config).regenBonus
+					const regenAmount = config.regenHealthAmount + weightsOf(config).regenBonus + this.extraRegenBonus
 					this.health = Math.min(this.maxHealth, this.health + regenAmount)
 				}
 			} else {
@@ -876,7 +949,7 @@ export function findPreyTarget(agent: PlayerAgent, config: PlayerAgentConfig): P
 	// 스캔 범위는 레벨과 함께 넓어진다 (성장할수록 더 멀리서 전투를 시작).
 	// 맹공격 프리셋은 scanWeight로 성장 폭을 넓힌다.
 	const scanRange = config.attackRangeMeters * config.huntAggroRangeMultiplier
-		+ (agent.level - 1) * config.huntScanRangePerLevel * weightsOf(config).scanWeight
+		+ (agent.level - 1) * (config.huntScanRangePerLevel * weightsOf(config).scanWeight + agent.extraScanRangePerLevel)
 	let nearest: PlayerThreatSource | null = null
 	let nearestDistance = Number.POSITIVE_INFINITY
 	for (const threat of config.threatSources()) {

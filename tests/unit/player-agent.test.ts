@@ -20,6 +20,7 @@ import {
   type PlayerThreatSource,
   type PresetWeights,
 } from '../../src/game/player/agent'
+import { type LevelUpPool, type PresetAffinity } from '../../src/game/player/level-up-cards'
 import type { PlanePoint } from '../../src/game/resources/trees'
 import type { TreeResource } from '../../src/game/resources/trees'
 
@@ -1545,5 +1546,270 @@ describe('player preset weights', () => {
     agent.addExperience(100)
     expect(agent.attackDamage).toBe(10 + 10) // 가중치 1
     expect(agent.maxHealth).toBe(100 + 20) // 가중치 1
+  })
+})
+
+describe('player level-up cards', () => {
+  const POOL: LevelUpPool = {
+    cardCount: 3,
+    choices: [
+      { id: 'attack', pickWeight: 1.0, effects: { attackBonus: 5 } },
+      { id: 'health', pickWeight: 1.0, effects: { healthBonus: 30 } },
+      { id: 'crit',   pickWeight: 1.0, effects: { critChanceBonus: 0.04 } },
+    ],
+  }
+  const BALANCED_AFFINITY: PresetAffinity = { attack: 1, health: 1, speed: 1, crit: 1, regen: 1, scan: 1 }
+  const AGGR_AFFINITY: PresetAffinity = { attack: 5, health: 0.1, speed: 1, crit: 1, regen: 1, scan: 1 }
+
+  const baseConfig = (overrides: Partial<PlayerAgentConfig> = {}): PlayerAgentConfig => ({
+    exploreDistance: 50,
+    speed: 20,
+    collectRadius: 5,
+    chopDurationMs: 1_000,
+    attackRangeMeters: 20,
+    attackDamageMs: 100,
+    attackCooldownMs: 500,
+    playerAttackDamage: 10,
+    playerMaxHealth: 100,
+    killHealHealth: 10,
+    regenHealthAmount: 1,
+    regenIntervalMs: 1_000,
+    criticalHealthRatio: 0.25,
+    fleeSafeDistanceMeters: 100,
+    expBase: 100,
+    expGrowth: 1,
+    levelAttackBonus: 10,
+    levelHealthBonus: 20,
+    levelSpeedBonus: 5,
+    huntScanRangePerLevel: 5,
+    slamUnlockLevel: 99,
+    slamCooldownMs: 0,
+    slamRadius: 0,
+    slamDamageMultiplier: 0,
+    furyUnlockLevel: 99,
+    furyCooldownMs: 0,
+    furyDurationMs: 0,
+    furySwingMultiplier: 1,
+    leechUnlockLevel: 99,
+    leechRatio: 0,
+    upgradeCostBase: 999,
+    upgradeCostGrowth: 1,
+    weaponAttackPerTier: 0,
+    weaponPowerPerTier: 0,
+    reserveWood: 0,
+    playerBasePower: 50,
+    powerPerWood: 0,
+    monsterHealthPowerWeight: 1,
+    monsterAttackPowerWeight: 1,
+    huntAggroRangeMultiplier: 1,
+    huntGiveUpRangeMultiplier: 1,
+    worldRadius: 1_000,
+    collisionCheck: () => false,
+    treeResources: () => [],
+    threatSources: () => [],
+    levelUpPool: POOL,
+    levelUpAffinity: BALANCED_AFFINITY,
+    ...overrides,
+  })
+
+  it('applies the chosen card effects on level-up instead of the base bonuses', () => {
+    const agent = createPlayerAgent([0, 0], baseConfig())
+    agent.addExperience(100) // 1 level-up
+    expect(agent.level).toBe(2)
+    expect(agent.pendingLevelUps).toHaveLength(1)
+    const choice = agent.pendingLevelUps[0]
+    // baseLevelAttackBonus/Health/Speed는 카드 풀 사용 시 무시되고, 카드 효과만 적용
+    expect(agent.attackDamage === 15 || agent.maxHealth === 130 || agent.critChance > 0).toBe(true)
+    expect(choice).toBeDefined()
+    expect(['attack', 'health', 'crit']).toContain(choice.chosenId)
+  })
+
+  it('records the last level-up choice separately for single-card HUD display', () => {
+    const agent = createPlayerAgent([0, 0], baseConfig())
+    agent.addExperience(100)
+    expect(agent.lastLevelUpChoice).not.toBeNull()
+  })
+
+  it('aggressive affinity biases picks toward attack', () => {
+    const agent = createPlayerAgent([0, 0], baseConfig({ levelUpAffinity: AGGR_AFFINITY }))
+    agent.addExperience(100)
+    expect(agent.pendingLevelUps[0].chosenId).toBe('attack')
+    expect(agent.attackDamage).toBe(10 + 5) // 카드 attack 효과만 적용
+    expect(agent.maxHealth).toBe(100) // health는 카드 효과로만 오르므로 기본값 유지
+  })
+
+  it('falls back to base level bonuses when no pool is provided', () => {
+    const cfg = baseConfig()
+    delete cfg.levelUpPool
+    delete cfg.levelUpAffinity
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.addExperience(100)
+    expect(agent.pendingLevelUps).toHaveLength(0)
+    expect(agent.attackDamage).toBe(10 + 10)
+    expect(agent.maxHealth).toBe(100 + 20)
+  })
+
+  it('extraRegenBonus contributes to non-combat regen', () => {
+    const cfg = baseConfig({ levelUpPool: { cardCount: 3, choices: [{ id: 'regen', pickWeight: 1, effects: { regenBonus: 2 } }] } })
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.addExperience(100)
+    expect(agent.extraRegenBonus).toBe(2)
+    agent.health = 50
+    agent.regenTimer = 1_000
+    agent.update(0, 2_000)
+    expect(agent.health).toBe(50 + 1 + 2) // regenHealthAmount + extraRegenBonus
+  })
+
+  it('extraScanRangePerLevel widens the prey scan range', () => {
+    const weakThreat = {
+      id: 'prey', position: [90, 0], homePosition: [0, 0],
+      activityRadius: 200, speed: 1, attackRadius: 5, attackDamage: 1, health: 1,
+    }
+    const cfg = baseConfig({
+      levelUpPool: { cardCount: 3, choices: [{ id: 'scan', pickWeight: 1, effects: { scanBonus: 100 } }] },
+      threatSources: () => [weakThreat],
+    })
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.addExperience(100)
+    expect(agent.extraScanRangePerLevel).toBe(100)
+
+    // 약한 적 90 거리: 기본 스캔(20) < 90 이지만, extra=100 덕분에 잡힌다.
+    const target = findPreyTarget(agent, cfg)
+    expect(target).not.toBeNull()
+    expect(target?.id).toBe('prey')
+  })
+
+  it('critChance is clamped to [0, 1]', () => {
+    const cfg = baseConfig({ levelUpPool: { cardCount: 1, choices: [{ id: 'crit', pickWeight: 1, effects: { critChanceBonus: 0.8 } }] } })
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.addExperience(100)
+    expect(agent.critChance).toBe(0.8)
+    agent.addExperience(100)
+    expect(agent.critChance).toBe(1) // 0.8 + 0.8 → clamp
+  })
+
+  it('falls back to neutral affinity when levelUpAffinity is undefined', () => {
+    const cfg = baseConfig({ levelUpPool: POOL })
+    delete cfg.levelUpAffinity
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.addExperience(100)
+    expect(agent.pendingLevelUps).toHaveLength(1)
+  })
+
+  it('applies the healthBonus card effect (heals on level-up)', () => {
+    const cfg = baseConfig({ levelUpPool: { cardCount: 1, choices: [{ id: 'health', pickWeight: 1, effects: { healthBonus: 40 } }] } })
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.health = 100 // max
+    agent.addExperience(100)
+    expect(agent.maxHealth).toBe(140)
+    expect(agent.health).toBe(140) // heal += same amount, clamped to maxHealth
+  })
+
+  it('applies the speedBonus card effect to both this.speed and config.speed', () => {
+    const cfg = baseConfig({ levelUpPool: { cardCount: 1, choices: [{ id: 'speed', pickWeight: 1, effects: { speedBonus: 3 } }] } })
+    const initialCfgSpeed = cfg.speed
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.addExperience(100)
+    expect(agent.speed).toBe(initialCfgSpeed + 3)
+    // config.speed도 같이 올라가야 moveToward가 새 속도를 본다.
+    expect(cfg.speed).toBe(initialCfgSpeed + 3)
+  })
+})
+
+describe('player mastery integration', () => {
+  const baseCfg = (): PlayerAgentConfig => ({
+    exploreDistance: 50,
+    speed: 20,
+    collectRadius: 5,
+    chopDurationMs: 1_000,
+    attackRangeMeters: 20,
+    attackDamageMs: 100,
+    attackCooldownMs: 500,
+    playerAttackDamage: 10,
+    playerMaxHealth: 100,
+    killHealHealth: 10,
+    regenHealthAmount: 1,
+    regenIntervalMs: 1_000,
+    criticalHealthRatio: 0.25,
+    fleeSafeDistanceMeters: 100,
+    expBase: 100,
+    expGrowth: 1,
+    levelAttackBonus: 0,
+    levelHealthBonus: 0,
+    levelSpeedBonus: 0,
+    huntScanRangePerLevel: 5,
+    slamUnlockLevel: 99,
+    slamCooldownMs: 0,
+    slamRadius: 0,
+    slamDamageMultiplier: 0,
+    furyUnlockLevel: 99,
+    furyCooldownMs: 0,
+    furyDurationMs: 0,
+    furySwingMultiplier: 1,
+    leechUnlockLevel: 99,
+    leechRatio: 0,
+    upgradeCostBase: 999,
+    upgradeCostGrowth: 1,
+    weaponAttackPerTier: 0,
+    weaponPowerPerTier: 0,
+    reserveWood: 0,
+    playerBasePower: 50,
+    powerPerWood: 0,
+    monsterHealthPowerWeight: 1,
+    monsterAttackPowerWeight: 1,
+    huntAggroRangeMultiplier: 1,
+    huntGiveUpRangeMultiplier: 1,
+    worldRadius: 1_000,
+    collisionCheck: () => false,
+    treeResources: () => [],
+    threatSources: () => [],
+  })
+
+  it('applyMasteryBonus adds stats and clamps crit', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg())
+    agent.applyMasteryBonus({ critChanceBonus: 0.4 })
+    expect(agent.critChance).toBe(0.4)
+    agent.applyMasteryBonus({ critChanceBonus: 0.4 })
+    expect(agent.critChance).toBe(0.8)
+    agent.applyMasteryBonus({ critChanceBonus: 0.5 })
+    expect(agent.critChance).toBe(1) // clamp
+  })
+
+  it('applyMasteryBonus adds critMultiplier and attackDamage', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg())
+    agent.applyMasteryBonus({ critMultiplierBonus: 0.3, attackBonus: 5 })
+    expect(agent.critMultiplier).toBe(1.8) // 1.5 + 0.3
+    expect(agent.attackDamage).toBe(15) // 10 + 5
+  })
+
+  it('applyMasteryBonus adds scanRangeBonus to extraScanRangePerLevel', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg())
+    agent.applyMasteryBonus({ scanRangeBonus: 25 })
+    expect(agent.extraScanRangePerLevel).toBe(25)
+  })
+
+  it('applyMasteryBonus multiplies damageTakenMultiplier', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg())
+    agent.applyMasteryBonus({ damageTakenMultiplier: 0.5 })
+    expect(agent.damageTakenMultiplier).toBe(0.5)
+    agent.applyMasteryBonus({ damageTakenMultiplier: 0.5 })
+    expect(agent.damageTakenMultiplier).toBe(0.25)
+  })
+
+  it('applyDamage respects damageTakenMultiplier', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg())
+    agent.damageTakenMultiplier = 0.5
+    agent.applyDamage(20)
+    expect(agent.health).toBe(90) // 100 - round(20*0.5)
+  })
+
+  it('applyMasteryBonus ignores undefined fields', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg())
+    agent.applyMasteryBonus({})
+    expect(agent.critChance).toBe(0)
+    expect(agent.critMultiplier).toBe(1.5)
+    expect(agent.damageTakenMultiplier).toBe(1)
+    expect(agent.attackDamage).toBe(10)
+    expect(agent.extraScanRangePerLevel).toBe(0)
   })
 })

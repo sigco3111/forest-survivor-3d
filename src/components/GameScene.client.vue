@@ -139,6 +139,16 @@
 			<div class="player-status__line player-status__line--threat">{{ status.threatLine || t('hud.status.none') }}</div>
 			<div class="player-status__line player-status__line--prey">{{ status.preyLine || t('hud.status.none') }}</div>
 		</div>
+		<div class="mastery-panel" v-if="masterySummary">
+			<div class="mastery-panel__title">{{ t('hud.mastery.title') }}</div>
+			<div class="mastery-panel__row" v-for="row in masterySummary.rows" :key="row.label">
+				<span class="mastery-panel__species">{{ row.label }}</span>
+				<span class="mastery-panel__count">{{ row.count }}</span>
+			</div>
+			<div v-if="masterySummary.bonusCount > 0" class="mastery-panel__bonus">
+				{{ t('hud.mastery.bonus') }} × {{ masterySummary.bonusCount }}
+			</div>
+		</div>
 		<div v-if="bossBar" class="boss-bar">
 			<div class="boss-bar__name">{{ bossBar.name }} · {{ bossBar.distance }}m</div>
 			<div class="boss-bar__track">
@@ -149,6 +159,13 @@
 		<div v-if="daySummary.visible" class="day-summary">
 			<div class="day-summary__title">{{ t('hud.summary.title', { day: daySummary.day }) }}</div>
 			<div class="day-summary__text">{{ t('hud.summary.text', { wood: daySummary.wood, kills: daySummary.kills, damage: daySummary.damage }) }}</div>
+		</div>
+		<div v-if="levelUpCard" class="level-up-card">
+			<div class="level-up-card__title">{{ t('hud.levelUp.title', { level: levelUpCard.level }) }}</div>
+			<div class="level-up-card__row">
+				<span class="level-up-card__id">{{ t(`hud.levelUp.${levelUpCard.choice.id}`) }}</span>
+				<span class="level-up-card__hint">{{ t('hud.levelUp.cardLabel') }}</span>
+			</div>
 		</div>
 		<div class="combat-log" aria-live="polite">
 			<div
@@ -223,6 +240,8 @@ import {
 	DAY_CYCLE_CONFIG,
 	ENVIRONMENT_CONFIG,
 	EVENT_CONFIG,
+	LEVEL_UP_CONFIG,
+	MASTERY_CONFIG,
 	MONSTER_CONFIG,
 	MONSTER_GUARDIAN_CONFIG,
 	PLAYER_CONFIG,
@@ -288,6 +307,7 @@ import {
 	type LightingController,
 } from '~/game/time/lighting'
 import { eventsForDay, type ScheduledEvent } from '~/game/events/scheduler'
+import { createMasteryState, recordKill, toApplication, type MasteryState } from '~/game/player/mastery'
 import { loadRunState, saveRunState, clearRunState, type RunSaveState } from '~/game/save'
 
 defineOptions({
@@ -536,6 +556,7 @@ let pendingRaid = { day: 0, count: 0 }
 let lastDayEvents: ScheduledEvent[] = []
 let goldenTreeId: string | null = null
 let goldenTreeBonus = 0
+let masteryState: MasteryState | null = null
 
 // 게임 시계: 배속/일시정지를 지원하기 위해 실시간과 분리된 누적 시간 (ms)
 let gameNow = 0
@@ -643,6 +664,7 @@ function createScene() {
 	lastDayEvents = []
 	goldenTreeId = null
 	goldenTreeBonus = 0
+	masteryState = createMasteryState()
 
 	addEnvironment(scene)
 	createTrees(scene)
@@ -917,10 +939,15 @@ function plantTreeAtPosition(position: PlanePoint) {
 function handlePlayerAttack(monsterId: string, damage: number) {
 	const agent = monsterAgents.find(candidate => candidate.resource.id === monsterId)
 	if (!agent || agent.resource.health <= 0) return
-	spawnDamagePopup(agent.position[0], 8, agent.position[1], `-${damage}`, 'damage')
-	pendingPlayerHits.push({ id: monsterId, damage })
+	// 크리티컬 판정: critChance / critMultiplier는 카드/숙련도로 누적된 값.
+	const isCrit = playerAgent ? Math.random() < playerAgent.critChance : false
+	const finalDamage = isCrit && playerAgent
+		? Math.round(damage * playerAgent.critMultiplier)
+		: damage
+	spawnDamagePopup(agent.position[0], 8, agent.position[1], `-${finalDamage}${isCrit ? '!' : ''}`, 'damage')
+	pendingPlayerHits.push({ id: monsterId, damage: finalDamage })
 	// 생명 흡수 스킬: 해준 피해의 일부 회복
-	playerAgent?.applyLifeLeech(damage)
+	playerAgent?.applyLifeLeech(finalDamage)
 }
 
 // 처치 정산: 나무 보상/체력 회복/경험치/리스폰 예약 (몬스터당 정확히 1회)
@@ -944,6 +971,20 @@ function settleKill(agent: MonsterAgent) {
 	// 처치 보상으로 체력 회복 + 경험치 (레벨업 시 공격력/체력/속도 증가)
 	playerAgent?.applyKillHeal()
 	playerAgent?.addExperience(agent.resource.maxHealth)
+	// 종족 숙련도: 누적 → 임계치 보너스 자동 적용
+	if (masteryState) {
+		const before = masteryState.activeBonus
+		masteryState = recordKill(masteryState, agent.resource, MASTERY_CONFIG)
+		const after = masteryState.activeBonus
+		const app = toApplication(after)
+		playerAgent?.applyMasteryBonus(app)
+		// 임계치 신규 발동 시 HUD 알림
+		for (const key of masteryState.lastTriggeredKeys) {
+			showToast(t('hud.mastery.bonus') + ' · ' + key)
+		}
+		// 변경분만 로그 남기기 (silent updates are not noise)
+		void before
+	}
 	// 하루 뒤 같은 티어의 몬스터가 리스폰된다 (보스는 스케줄 스폰 — 리스폰 예약 제외)
 	if (!agent.resource.isBoss) {
 		pendingRespawns.push({ dueDay: currentDay.value + 1, modelIndex: agent.resource.modelIndex })
@@ -1012,8 +1053,28 @@ let dayKills = 0
 let dayDamageTaken = 0
 let summaryTimer: ReturnType<typeof setTimeout> | null = null
 
-function showDaySummary() {
-	daySummary.value = {
+type LevelUpCardView = {
+	id: string
+	effects: Record<string, number>
+	level: number
+}
+const levelUpCard = ref<LevelUpCardView | null>(null)
+let levelUpTimer: ReturnType<typeof setTimeout> | null = null
+
+function showLevelUpCard() {
+	if (!playerAgent || !playerAgent.lastLevelUpChoice) return
+	levelUpCard.value = {
+		id: playerAgent.lastLevelUpChoice.id,
+		effects: playerAgent.lastLevelUpChoice.effects,
+		level: playerAgent.level,
+	}
+	if (levelUpTimer) clearTimeout(levelUpTimer)
+	levelUpTimer = setTimeout(() => {
+		levelUpCard.value = null
+	}, 1_800)
+}
+
+function showDaySummary() {	daySummary.value = {
 		visible: true,
 		day: Math.max(1, currentDay.value - 1),
 		wood: dayWoodGained,
@@ -1041,6 +1102,21 @@ const vignetteIntensity = ref(0)
 
 /** 시작 오버레이 표시 여부: 저장된 데이터가 있으면 이어하기·새로 시작 둘 다 노출, 없으면 프리셋 3개만 */
 const presets = computed(() => !runStarted.value)
+
+type MasteryRow = { label: string; count: number }
+const masterySummary = computed(() => {
+	if (!masteryState) return null
+	const rows: MasteryRow[] = []
+	for (const [species, count] of masteryState.speciesCounts) {
+		rows.push({ label: species, count })
+	}
+	if (masteryState.bossCount > 0) {
+		rows.push({ label: '👑', count: masteryState.bossCount })
+	}
+	rows.sort((a, b) => b.count - a.count)
+	const bonusCount = masteryState.triggeredKeys.size
+	return { rows, bonusCount }
+})
 
 function pickPreset(preset: PlayerPresetId): void {
 	selectedPreset.value = preset
@@ -1154,6 +1230,10 @@ function createPlayer(targetScene: Scene, preset: PlayerPresetId) {
 		worldRadius: WORLD_RADIUS,
 		collisionCheck: pos => checkCollision(pos) || (buildingManager?.blocks(pos) ?? false),
 		presetWeights: PRESET_CONFIG[preset],
+		levelUpPool: LEVEL_UP_CONFIG.pool
+			? { cardCount: LEVEL_UP_CONFIG.cardCount, choices: LEVEL_UP_CONFIG.pool }
+			: undefined,
+		levelUpAffinity: LEVEL_UP_CONFIG.presetAffinity[preset],
 		treeResources: () => treeResources,
 		// 살아있는 모든 몬스터를 후보로 노출한다:
 		// - hostile=true(chase/attack/hit)인 몬스터만 도망 판정 대상
@@ -1268,6 +1348,7 @@ function renderFrame() {
 	// 레벨업 로그
 	if (playerAgent.level > prevLevel) {
 		logEvent(t('hud.log.levelup', { level: playerAgent.level }), 'level')
+		showLevelUpCard()
 	}
 	// 스킬 시전 로그
 	if (playerAgent.lastSlamAt > prevSlamAt) {
@@ -1710,6 +1791,8 @@ function restartGame() {
 	dayKills = 0
 	dayDamageTaken = 0
 	vignetteIntensity.value = 0
+	levelUpCard.value = null
+	if (levelUpTimer) clearTimeout(levelUpTimer)
 
 	loadedSave.value = null
 	selectedPreset.value = null
@@ -2034,6 +2117,7 @@ function disposeScene() {
 	keyLight = null
 	rimLight = null
 	cameraDirector = null
+	masteryState = null
 	projectileManager = null
 	buildingManager = null
 }
@@ -2454,6 +2538,57 @@ function disposeScene() {
 	color: #7dffa8;
 }
 
+.mastery-panel {
+	position: absolute;
+	top: 410px;
+	left: 20px;
+	z-index: 2;
+	width: 180px;
+	padding: 10px 12px;
+	border: 1px solid rgba(255, 107, 214, 0.35);
+	border-radius: 12px;
+	background: rgba(3, 12, 24, 0.72);
+	color: #dffcff;
+	font-family: ui-sans-serif, system-ui, sans-serif;
+	box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+	backdrop-filter: blur(12px);
+}
+
+.mastery-panel__title {
+	margin-bottom: 6px;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.06em;
+	color: #ff6bd6;
+	text-shadow: 0 0 12px rgba(255, 107, 214, 0.4);
+}
+
+.mastery-panel__row {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	font-size: 11px;
+	line-height: 1.55;
+}
+
+.mastery-panel__species {
+	opacity: 0.75;
+}
+
+.mastery-panel__count {
+	font-weight: 700;
+	color: #ffd166;
+}
+
+.mastery-panel__bonus {
+	margin-top: 4px;
+	padding-top: 4px;
+	border-top: 1px solid rgba(255, 107, 214, 0.18);
+	font-size: 10px;
+	font-weight: 700;
+	color: #35f4ff;
+}
+
 .minimap-toggle {
 	position: absolute;
 	top: 166px;
@@ -2798,6 +2933,54 @@ function disposeScene() {
 		opacity: 1;
 		transform: translateX(-50%) translateY(0);
 	}
+}
+
+.level-up-card {
+	position: absolute;
+	top: 124px;
+	left: 50%;
+	z-index: 8;
+	min-width: 240px;
+	padding: 12px 24px;
+	border: 1px solid rgba(53, 244, 255, 0.55);
+	border-radius: 12px;
+	background: rgba(3, 12, 24, 0.86);
+	text-align: center;
+	color: #dffcff;
+	font-family: ui-sans-serif, system-ui, sans-serif;
+	transform: translateX(-50%);
+	animation: levelup-in 0.3s ease-out;
+}
+
+.level-up-card__title {
+	font-size: 14px;
+	font-weight: 800;
+	color: #ffc857;
+	letter-spacing: 0.06em;
+}
+
+.level-up-card__row {
+	display: flex;
+	gap: 12px;
+	align-items: center;
+	justify-content: center;
+	margin-top: 4px;
+	font-size: 13px;
+}
+
+.level-up-card__id {
+	font-weight: 700;
+	color: #35f4ff;
+}
+
+.level-up-card__hint {
+	font-size: 10px;
+	opacity: 0.6;
+}
+
+@keyframes levelup-in {
+	from { opacity: 0; transform: translateX(-50%) translateY(-12px); }
+	to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
 .game-over-best {

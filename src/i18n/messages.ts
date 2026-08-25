@@ -75,6 +75,21 @@ export const messages = {
 				title: 'Day {day} complete',
 				text: 'Wood +{wood} · Kills {kills} · Damage {damage}',
 			},
+			levelUp: {
+				title: 'Level {level}!',
+				cardLabel: 'Auto-picked',
+				attack: 'Attack +{value}',
+				health: 'Health +{value}',
+				speed: 'Speed +{value}',
+				crit: 'Crit +{value}%',
+				regen: 'Regen +{value}',
+				scan: 'Hunt range +{value}',
+			},
+			mastery: {
+				title: 'Mastery',
+				hint: 'Slain counts',
+				bonus: 'Bonus',
+			},
 		},
 		camera: {
 			free: 'Switch to free camera',
@@ -178,6 +193,21 @@ export const messages = {
 				title: '第 {day} 天结束',
 				text: '木材 +{wood} · 击杀 {kills} · 伤害 {damage}',
 			},
+			levelUp: {
+				title: '{level} 级！',
+				cardLabel: '自动选择',
+				attack: '攻击 +{value}',
+				health: '生命 +{value}',
+				speed: '速度 +{value}',
+				crit: '暴击 +{value}%',
+				regen: '回复 +{value}',
+				scan: '狩猎范围 +{value}',
+			},
+			mastery: {
+				title: '熟练度',
+				hint: '击杀数',
+				bonus: '加成',
+			},
 		},
 		camera: {
 			free: '切换自由视角',
@@ -280,6 +310,21 @@ export const messages = {
 			summary: {
 				title: '{day}일차 종료',
 				text: '나무 +{wood} · 처치 {kills} · 피해 {damage}',
+			},
+			levelUp: {
+				title: '레벨 {level}!',
+				cardLabel: '자동 선택',
+				attack: '공격 +{value}',
+				health: '체력 +{value}',
+				speed: '속도 +{value}',
+				crit: '치명타 +{value}%',
+				regen: '회복 +{value}',
+				scan: '사냥 범위 +{value}',
+			},
+			mastery: {
+				title: '숙련도',
+				hint: '종족 처치수',
+				bonus: '보너스',
 			},
 		},
 		camera: {
