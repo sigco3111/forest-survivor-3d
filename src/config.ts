@@ -15,6 +15,7 @@ export const PLAYER_CONFIG = {
   regenHealthAmount: 2, // 비전투 중 체력 회복량 (틱당)
   regenIntervalMs: 1000, // 비전투 체력 회복 틱 간격
   criticalHealthRatio: 0.25, // 위기 체력 비율: 이하로 내려가면 교전을 접고 도주한다
+  fleeSafeDistanceMeters: 250, // 이 거리만큼 벗어나면 도망을 종료하고 회복한다 (보스 장기 추격 대비)
 };
 
 // 树资源配置：使用确定性噪声生成，采集后枯树淡出并在随机位置重生。

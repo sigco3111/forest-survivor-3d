@@ -51,6 +51,7 @@ function makeConfig(overrides: Partial<PlayerAgentConfig> = {}): PlayerAgentConf
     regenHealthAmount: 2,
     regenIntervalMs: 1000,
     criticalHealthRatio: 0.25,
+    fleeSafeDistanceMeters: 250,
     expBase: 100,
     expGrowth: 1.6,
     levelAttackBonus: 3,
@@ -350,6 +351,49 @@ describe('player agent', () => {
     expect(isPlayerCritical(agent, config)).toBe(true)
     agent.health = 26
     expect(isPlayerCritical(agent, config)).toBe(false)
+  })
+
+  it('engages the boss instead of fleeing or ignoring it', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0)
+    // 보스: 활동 반경(100) 밖 150m에서 접근 중 — containment 규칙이면 무시했던 케이스
+    const boss = makeThreat({ id: 'boss', position: [150, 0], homePosition: [0, 0], activityRadius: 100, isBoss: true, health: 900, attackDamage: 50 })
+    const config = makeConfig({ threatSources: () => [boss] })
+    const agent = createPlayerAgent([0, 0], config)
+    agent.woodCollected = 100
+
+    agent.update(0, 0)
+
+    // 도망/무시 대신 보스를 향해 직행한다 (보스 사냥은 포기 범위 없음)
+    expect(agent.state).toBe('hunting')
+    expect(agent.attackTarget?.id).toBe('boss')
+  })
+
+  it('recognizes the boss as a threat even outside its activity radius when critical', () => {
+    const boss = makeThreat({ id: 'boss', position: [310, 0], homePosition: [0, 0], activityRadius: 100, isBoss: true, health: 900, attackDamage: 50, speed: 1 })
+    const config = makeConfig({ threatSources: () => [boss] })
+    const agent = createPlayerAgent([300, 0], config)
+    agent.health = 20 // 위기 체력
+
+    agent.update(0, 0)
+
+    // 보스가 활동 반경 밖이어도 안전 거리(250) 안이면 도주한다
+    expect(agent.state).toBe('fleeing')
+  })
+
+  it('flees from the boss at critical health and stops once it is far away', () => {
+    const boss = makeThreat({ id: 'boss', position: [100, 0], homePosition: [0, 0], activityRadius: 100, isBoss: true, health: 900, attackDamage: 50, speed: 1 })
+    const config = makeConfig({ threatSources: () => [boss] })
+    const agent = createPlayerAgent([0, 0], config)
+    agent.health = 20 // 위기 체력
+
+    agent.update(0, 0)
+    expect(agent.state).toBe('fleeing')
+
+    // 보스가 안전 거리(250) 밖으로 밀리면 도망 종료 → 회복 (키트-회복 루프)
+    boss.position = [400, 0]
+    agent.position = [...agent.target]
+    agent.update(0, 100)
+    expect(agent.state).toBe('exploring')
   })
 
   it('breaks off an ongoing fight and flees when health turns critical', () => {

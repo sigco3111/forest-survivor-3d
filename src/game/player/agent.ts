@@ -19,6 +19,8 @@ export type PlayerThreatSource = {
 	health?: number
 	/** 플레이어를 추격/공격 중인지. false면 도망 판정 대상에서 제외되지만 사냥감은 될 수 있다. */
 	hostile?: boolean
+	/** 보스: containment 무시하고 항상 위협으로 인지하며, 위기 체력이 아니면 무조건 교전한다. */
+	isBoss?: boolean
 }
 
 type AvoidedArea = {
@@ -49,6 +51,7 @@ export type PlayerAgentConfig = {
 	regenHealthAmount: number         // 비전투 중 체력 회복량 (틱당)
 	regenIntervalMs: number           // 비전투 체력 회복 틱 간격
 	criticalHealthRatio: number       // 위기 체력 비율 (이하 → 도주 우선)
+	fleeSafeDistanceMeters: number    // 이 거리만큼 벗어나면 도망 종료 (회복 전환)
 	expBase: number                   // 2레벨까지 필요 경험치
 	expGrowth: number                 // 레벨별 필요 경험치 증가율
 	levelAttackBonus: number          // 레벨당 공격력 증가
@@ -316,10 +319,11 @@ function resolveCombatIntent(agent: PlayerAgent, now: number, config: PlayerAgen
 	const critical = isPlayerCritical(agent, config)
 	const hostiles = config.threatSources().filter(isHostileThreat)
 
-	// 위기 체력에서는 "이길 수 없는 적"뿐 아니라 모든 적대적 위협이 도망 대상이다
-	const threat = critical
-		? findActiveThreat(agent.position, config)
-		: findNearestStrongThreat(agent, hostiles, config)
+			// 위기 체력에서는 "이길 수 없는 적"뿐 아니라 모든 적대적 위협이 도망 대상이다.
+			// 단, 안전 거리 밖의 위협은 무시한다 — 도망-회복 키팅 루프를 위해.
+			const threat = critical
+				? findActiveThreat(agent.position, config, config.fleeSafeDistanceMeters)
+				: findNearestStrongThreat(agent, hostiles, config)
 
 	if (threat) {
 		if (agent.state !== 'fleeing') {
@@ -327,6 +331,11 @@ function resolveCombatIntent(agent: PlayerAgent, now: number, config: PlayerAgen
 				// 위기 체력: 근접 반격 없이 무조건 도주
 				registerFailedAreaAttempt(agent, threat, now)
 				startFleeing(agent, threat, config, now)
+				return
+			}
+			// 보스는 설계된 도전 과제 — 체력이 위기가 아니면 무조건 맞서싸운다 (도주 금지)
+			if (threat.isBoss) {
+				engageTarget(agent, threat, now, config)
 				return
 			}
 			if (shouldFleeThreat(agent, now, threat, config)) {
@@ -516,7 +525,8 @@ function updateHunting(
 	const distance = distanceTo(agent.position, liveTarget.position)
 	const giveUpRange = config.attackRangeMeters * config.huntGiveUpRangeMultiplier
 
-	if (distance > giveUpRange) {
+	// 보스 사냥은 포기 범위 없음 — 지도 끝까지 추격한다
+	if (distance > giveUpRange && !liveTarget.isBoss) {
 		exitCombat(agent, config)
 		return
 	}
@@ -582,15 +592,22 @@ function exitCombat(agent: PlayerAgent, config: PlayerAgentConfig) {
 function updateFleeing(agent: PlayerAgent, delta: number, config: PlayerAgentConfig) {
 	const threat = findActiveThreat(agent.position, config)
 
-	if (threat && distanceTo(agent.target, threat.homePosition) <= threat.activityRadius) {
-		agent.target = pickFleeTarget(agent.position, threat, config)
+	if (threat) {
+		const targetReached = distanceTo(agent.position, agent.target) < 3
+		const targetInsideDanger = distanceTo(agent.target, threat.homePosition) <= threat.activityRadius
+		// 위험 구역 안이거나 도주 지점에 도달했으면 계속 멀어지는 방향으로 재선택
+		if (targetInsideDanger || targetReached) {
+			agent.target = pickFleeTarget(agent.position, threat, config)
+		}
 	}
 
 	moveToward(agent, delta, config)
 	agent.bearing = faceTarget(agent, agent.target)
 	agent.animation = 'walk'
 
-	if (!threat && distanceTo(agent.position, agent.target) < 3) {
+	// 위협이 사라졌거나 안전 거리 밖으로 벗어났으면 도망 종료 (회복 전환)
+	const safe = !threat || distanceTo(agent.position, threat.position) > config.fleeSafeDistanceMeters
+	if (safe && distanceTo(agent.position, agent.target) < 3) {
 		agent.state = 'exploring'
 		agent.activeTree = null
 		agent.choppingProgress = 0
@@ -872,8 +889,11 @@ function findNearestStrongThreat(
 	let nearest: PlayerThreatSource | null = null
 	let nearestDistance = Number.POSITIVE_INFINITY
 	for (const threat of hostiles) {
-		const distanceFromHome = distanceTo(agent.position, threat.homePosition)
-		if (distanceFromHome > threat.activityRadius) continue
+		// 보스는 활동 반경을 무시하고 전역 추격하므로 containment 없이 항상 후보다
+		if (!threat.isBoss) {
+			const distanceFromHome = distanceTo(agent.position, threat.homePosition)
+			if (distanceFromHome > threat.activityRadius) continue
+		}
 		if (isThreatWeakerThanPlayer(agent, threat, config)) continue
 		const distanceFromThreat = distanceTo(agent.position, threat.position)
 		if (isCloserThreat(distanceFromThreat, nearestDistance)) {
@@ -884,16 +904,24 @@ function findNearestStrongThreat(
 	return nearest
 }
 
-function findActiveThreat(position: PlanePoint, config: PlayerAgentConfig): PlayerThreatSource | null {
+function findActiveThreat(
+	position: PlanePoint,
+	config: PlayerAgentConfig,
+	maxDistance?: number,
+): PlayerThreatSource | null {
 	let nearestThreat: PlayerThreatSource | null = null
 	let nearestDistance = Number.POSITIVE_INFINITY
 
 	for (const threat of config.threatSources()) {
 		if (!isHostileThreat(threat)) continue
-		const distanceFromHome = distanceTo(position, threat.homePosition)
-		if (distanceFromHome > threat.activityRadius) continue
-
+		// 보스는 containment 무시
+		if (!threat.isBoss) {
+			const distanceFromHome = distanceTo(position, threat.homePosition)
+			if (distanceFromHome > threat.activityRadius) continue
+		}
+		// 안전 거리 상한 (위기 도주 시 사용): 이 거리 밖의 위협은 일단 무시
 		const distanceFromThreat = distanceTo(position, threat.position)
+		if (maxDistance !== undefined && distanceFromThreat > maxDistance) continue
 		if (distanceFromThreat < nearestDistance) {
 			nearestThreat = threat
 			nearestDistance = distanceFromThreat

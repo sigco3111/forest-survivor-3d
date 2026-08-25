@@ -1005,6 +1005,7 @@ function createPlayer(targetScene: Scene) {
 		regenHealthAmount: PLAYER_CONFIG.regenHealthAmount,
 		regenIntervalMs: PLAYER_CONFIG.regenIntervalMs,
 		criticalHealthRatio: PLAYER_CONFIG.criticalHealthRatio,
+		fleeSafeDistanceMeters: PLAYER_CONFIG.fleeSafeDistanceMeters,
 		playerBasePower: COMBAT_AGGRESSION_CONFIG.playerBasePower,
 		powerPerWood: COMBAT_AGGRESSION_CONFIG.powerPerWood,
 		monsterHealthPowerWeight: COMBAT_AGGRESSION_CONFIG.monsterHealthPowerWeight,
@@ -1045,6 +1046,7 @@ function createPlayer(targetScene: Scene) {
 				attackDamage: agent.resource.attackDamage,
 				health: agent.resource.health,
 				hostile: agent.state === 'chase' || agent.state === 'attack' || agent.state === 'hit',
+				isBoss: agent.resource.isBoss,
 			})),
 	})
 
