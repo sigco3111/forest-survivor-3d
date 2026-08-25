@@ -5,6 +5,7 @@ import {
 	type TreeResource,
 } from '../resources/trees'
 import { applyCardEffects, rollLevelUp, type LevelUpPool, type PresetAffinity } from './level-up-cards'
+import { applySkillNodeEffects, findNewUnlocks } from './skill-tree'
 
 export type PlayerAgentState = 'exploring' | 'approaching' | 'chopping' | 'fleeing' | 'attacking' | 'hunting'
 
@@ -113,6 +114,8 @@ export type PlayerAgentConfig = {
 	levelUpPool?: LevelUpPool
 	/** 풀에서 카드를 자동 채택할 때 쓰는 성향별 친화도. 미지정 시 균형 1.0 */
 	levelUpAffinity?: PresetAffinity
+	/** 스킬트리: 레벨 임계 도달 시 노드를 자동 해금한다 (선택) */
+	skillTree?: import('./skill-tree').SkillTreeConfig
 	worldRadius: number           // 世界半径
 	collisionCheck: (position: PlanePoint) => boolean
 	treeResources: () => TreeResource[]
@@ -164,14 +167,32 @@ export type PlayerAgent = {
 	extraRegenBonus: number
 	/** 카드/숙련도로 누적된 스캔 범위 보너스 (레벨당 가산). */
 	extraScanRangePerLevel: number
+	/** 회피 확률 (0..1). 스킬트리/숙련도로 누적. */
+	dodgeChance: number
+	/** 슬램 쿨다운 배율 (스킬트리 공격 브랜치). 기본 1, 낮을수록 자주 시전. */
+	slamCooldownMultiplier: number
+	/** 분노 지속 시간 배율 (스킬트리 공격 브랜치). 기본 1. */
+	furyDurationMultiplier: number
+	/** 추가 고정 피해 (스킬트리 공격 브랜치). 매 스윙마다 가산. */
+	bonusFlatDamage: number
+	/** 수집 반경 배율 (스킬트리 유틸 브랜치). 기본 1. */
+	collectRadiusMultiplier: number
+	/** 스캔 범위 배율 (스킬트리 유틸 브랜치). 기본 1. */
+	scanRangeMultiplier: number
+	/** 위기 체력 도주 억제 플래그 (스킬트리 유틸 브랜치 결의). */
+	suppressFlee: boolean
+	/** 해금된 스킬트리 노드 ID 집합 (중복 해금 방지). */
+	unlockedSkillNodes: string[]
+	/** 이번 호출에 해금된 노드 (HUD 알림 후 비움). */
+	pendingSkillUnlocks: string[]
 	/** 이번 프레임에 일어난 레벨업 결과 큐. GameScene가 HUD 표시 후 비운다. */
 	pendingLevelUps: { chosenId: string; effects: Record<string, number> }[]
 	/** 마지막으로 처리한 레벨업 결과 (마지막 카드 한 장 — HUD 단일 카드용). */
 	lastLevelUpChoice: { id: string; effects: Record<string, number> } | null
 
 	update(delta: number, now: number): void
-	/** 피해를 입힌다. 체력이 0이 되면 playerAlive = false (사망). */
-	applyDamage(amount: number): void
+	/** 피해를 입힌다. 회피 시 true를 반환하고 피해는 적용되지 않는다. 체력이 0이 되면 playerAlive = false (사망). */
+	applyDamage(amount: number): boolean
 	/** 몬스터 처치 보상으로 체력을 회복한다(최대치까지). */
 	applyKillHeal(): void
 	/** 처치 경험치를 누적한다. 기준치를 넘으면 레벨업(공격력/체력/속도 증가)이 연속 발동한다. */
@@ -249,14 +270,28 @@ export function createPlayerAgent(
 		damageTakenMultiplier: 1,
 		extraRegenBonus: 0,
 		extraScanRangePerLevel: 0,
+		dodgeChance: 0,
+		slamCooldownMultiplier: 1,
+		furyDurationMultiplier: 1,
+		bonusFlatDamage: 0,
+		collectRadiusMultiplier: 1,
+		scanRangeMultiplier: 1,
+		suppressFlee: false,
+		unlockedSkillNodes: [],
+		pendingSkillUnlocks: [],
 		pendingLevelUps: [],
 		lastLevelUpChoice: null,
 		failedAreaAttempt: null,
 
-		applyDamage(amount: number) {
+		applyDamage(amount: number): boolean {
+			// 회피 판정: dodgeChance로 Math.random 임계 (씬 레이어가 아닌 모델 내 결정성 보존 목적)
+			if (this.dodgeChance > 0 && Math.random() < this.dodgeChance) {
+				return true
+			}
 			const reduced = Math.round(amount * this.damageTakenMultiplier)
 			this.health = Math.max(0, this.health - reduced)
 			if (this.health <= 0) this.playerAlive = false
+			return false
 		},
 
 		applyKillHeal() {
@@ -269,6 +304,7 @@ export function createPlayerAgent(
 			let threshold = expForLevel(this.level, config)
 			const pool = config.levelUpPool
 			while (this.exp >= threshold) {
+				const prevLevel = this.level
 				this.exp -= threshold
 				this.level += 1
 
@@ -307,6 +343,15 @@ export function createPlayerAgent(
 					const speedDelta = config.levelSpeedBonus * weights.speedWeight
 					config.speed += speedDelta
 					this.speed += speedDelta
+				}
+				// 스킬트리: 방금 통과한 레벨 구간에서 새로 해금된 노드들을 적용한다.
+				if (config.skillTree) {
+					const newNodes = findNewUnlocks(config.skillTree, prevLevel, this.level, this.unlockedSkillNodes)
+					for (const node of newNodes) {
+						applySkillNodeEffects(this, node)
+						this.unlockedSkillNodes.push(node.id)
+						this.pendingSkillUnlocks.push(node.id)
+					}
 				}
 				threshold = expForLevel(this.level, config)
 			}
@@ -380,7 +425,7 @@ export function createPlayerAgent(
 			// 광역 강타: 사거리 무관 주변 모든 적 타격
 			if (
 				this.level >= config.slamUnlockLevel
-				&& now - this.lastSlamAt >= config.slamCooldownMs
+				&& now - this.lastSlamAt >= config.slamCooldownMs * this.slamCooldownMultiplier
 				&& inCombat
 			) {
 				this.lastSlamAt = now
@@ -399,7 +444,7 @@ export function createPlayerAgent(
 				&& inCombat
 			) {
 				this.lastFuryAt = now
-				this.furyActiveUntil = now + config.furyDurationMs
+				this.furyActiveUntil = now + config.furyDurationMs * this.furyDurationMultiplier
 			}
 
 			switch (this.state) {
@@ -543,7 +588,7 @@ function updateApproaching(agent: PlayerAgent, delta: number, now: number, confi
 	}
 
 	const dist = distanceTo(agent.position, agent.activeTree.position)
-	if (dist <= config.collectRadius) {
+	if (dist <= config.collectRadius * agent.collectRadiusMultiplier) {
 		agent.state = 'chopping'
 		agent.choppingProgress = 0.01
 		agent.animation = 'interact'
@@ -949,7 +994,7 @@ export function findPreyTarget(agent: PlayerAgent, config: PlayerAgentConfig): P
 	// 스캔 범위는 레벨과 함께 넓어진다 (성장할수록 더 멀리서 전투를 시작).
 	// 맹공격 프리셋은 scanWeight로 성장 폭을 넓힌다.
 	const scanRange = config.attackRangeMeters * config.huntAggroRangeMultiplier
-		+ (agent.level - 1) * (config.huntScanRangePerLevel * weightsOf(config).scanWeight + agent.extraScanRangePerLevel)
+		+ (agent.level - 1) * (config.huntScanRangePerLevel * weightsOf(config).scanWeight + agent.extraScanRangePerLevel) * agent.scanRangeMultiplier
 	let nearest: PlayerThreatSource | null = null
 	let nearestDistance = Number.POSITIVE_INFINITY
 	for (const threat of config.threatSources()) {

@@ -93,6 +93,46 @@ export const SKILL_CONFIG = {
   leechRatio: 0.3,
 };
 
+// ===== Tier 2: 스킬트리 (3 브랜치 × 3 노드) =====
+// 레벨 임계 도달 시 자동으로 노드가 해금되어 누적 효과를 받는다. 같은 노드는 중복 발동되지 않는다.
+export const SKILL_TREE_CONFIG = {
+  branches: {
+    attack: {
+      label: 'attack',
+      nodes: [
+        // Lv 3: 광역 강타 강화 (쿨다운 30% 감소)
+        { id: 'attack.slam.cooldown', unlockLevel: 3, effects: { slamCooldownMultiplier: 0.7 } },
+        // Lv 6: 분노 강화 (분노 지속 시간 +50%)
+        { id: 'attack.fury.extend', unlockLevel: 6, effects: { furyDurationMultiplier: 1.5 } },
+        // Lv 10: 임팩트 (일반 공격에 5% 추가 고정 피해)
+        { id: 'attack.impact', unlockLevel: 10, effects: { bonusFlatDamage: 4 } },
+      ],
+    },
+    defense: {
+      label: 'defense',
+      nodes: [
+        // Lv 4: 회피 (피격 시 10% 확률 무효)
+        { id: 'defense.dodge', unlockLevel: 4, effects: { dodgeChance: 0.1 } },
+        // Lv 7: 강인함 (받는 피해 12% 감소)
+        { id: 'defense.bulwark', unlockLevel: 7, effects: { damageTakenMultiplier: 0.88 } },
+        // Lv 12: 재생 (비전투 회복 1 추가)
+        { id: 'defense.regen', unlockLevel: 12, effects: { extraRegenBonus: 1 } },
+      ],
+    },
+    utility: {
+      label: 'utility',
+      nodes: [
+        // Lv 5: 채집 확대 (수집 반경 1.5배)
+        { id: 'utility.magnet', unlockLevel: 5, effects: { collectRadiusMultiplier: 1.5 } },
+        // Lv 8: 본능 (선제공격 스캔 범위 +30%)
+        { id: 'utility.instinct', unlockLevel: 8, effects: { scanRangeMultiplier: 1.3 } },
+        // Lv 11: 결의 (위기 체력에서 도주하지 않음 — 보스처럼 맞서기)
+        { id: 'utility.resolve', unlockLevel: 11, effects: { suppressFlee: true } },
+      ],
+    },
+  },
+};
+
 // 昼夜循环：1 分钟 = 游戏内 1 天
 export const DAY_CYCLE_CONFIG = {
   realMsPerDay: 60_000,        // 1 分钟 = 1 游戏天

@@ -248,6 +248,7 @@ import {
 	PRESET_CONFIG,
 	PROGRESSION_CONFIG,
 	SKILL_CONFIG,
+	SKILL_TREE_CONFIG,
 	TREE_RESOURCE_CONFIG,
 	WEAPON_CONFIG,
 } from '~/config'
@@ -645,7 +646,13 @@ function createScene() {
 		{
 			onHit: (damage: number) => {
 				if (!playerAgent) return
-				playerAgent.applyDamage(damage)
+				const dodged = playerAgent.applyDamage(damage)
+				if (dodged) {
+					spawnDamagePopup(playerAgent.position[0], 8, playerAgent.position[1], t('hud.log.dodge'), 'hurt')
+					logEvent(t('hud.log.dodge'), 'skill')
+					cameraDirector?.triggerHit(gameNow)
+					return
+				}
 				dayDamageTaken += damage
 				spawnDamagePopup(playerAgent.position[0], 8, playerAgent.position[1], `-${damage}`, 'hurt')
 				logEvent(t('hud.log.hurt', { count: damage }), 'hurt')
@@ -941,9 +948,10 @@ function handlePlayerAttack(monsterId: string, damage: number) {
 	if (!agent || agent.resource.health <= 0) return
 	// 크리티컬 판정: critChance / critMultiplier는 카드/숙련도로 누적된 값.
 	const isCrit = playerAgent ? Math.random() < playerAgent.critChance : false
+	const baseWithFlat = damage + (playerAgent?.bonusFlatDamage ?? 0)
 	const finalDamage = isCrit && playerAgent
-		? Math.round(damage * playerAgent.critMultiplier)
-		: damage
+		? Math.round(baseWithFlat * playerAgent.critMultiplier)
+		: baseWithFlat
 	spawnDamagePopup(agent.position[0], 8, agent.position[1], `-${finalDamage}${isCrit ? '!' : ''}`, 'damage')
 	pendingPlayerHits.push({ id: monsterId, damage: finalDamage })
 	// 생명 흡수 스킬: 해준 피해의 일부 회복
@@ -1234,6 +1242,7 @@ function createPlayer(targetScene: Scene, preset: PlayerPresetId) {
 			? { cardCount: LEVEL_UP_CONFIG.cardCount, choices: LEVEL_UP_CONFIG.pool }
 			: undefined,
 		levelUpAffinity: LEVEL_UP_CONFIG.presetAffinity[preset],
+		skillTree: SKILL_TREE_CONFIG,
 		treeResources: () => treeResources,
 		// 살아있는 모든 몬스터를 후보로 노출한다:
 		// - hostile=true(chase/attack/hit)인 몬스터만 도망 판정 대상
@@ -1357,6 +1366,12 @@ function renderFrame() {
 	if (playerAgent.furyActiveUntil > prevFuryUntil) {
 		logEvent(t('hud.log.fury'), 'skill')
 	}
+	// 스킬트리 자동 해금 알림 (이번 프레임에 큐에 들어온 노드만 1회 표시)
+	for (const nodeId of playerAgent.pendingSkillUnlocks) {
+		logEvent(t('hud.log.skillUnlock', { name: nodeId }), 'skill')
+		showToast(t('hud.log.skillUnlock', { name: nodeId }))
+	}
+	playerAgent.pendingSkillUnlocks = []
 	choppingProgress.value = playerAgent.choppingProgress
 	attackingProgress.value = playerAgent.attackingProgress
 	updatePlayerStatus()
@@ -1423,7 +1438,13 @@ function updateMonsters(delta: number, now: number) {
 		onAttackPlayer: () => {
 			// 몬스터 공격: 나무 대신 체력을 깎는다 (HP 0 = 사망)
 			if (!playerAgent) return
-			playerAgent.applyDamage(MONSTER_CONFIG.attackDamage)
+			const dodged = playerAgent.applyDamage(MONSTER_CONFIG.attackDamage)
+			if (dodged) {
+				spawnDamagePopup(playerAgent.position[0], 8, playerAgent.position[1], t('hud.log.dodge'), 'hurt')
+				logEvent(t('hud.log.dodge'), 'skill')
+				cameraDirector?.triggerHit(gameNow)
+				return
+			}
 			dayDamageTaken += MONSTER_CONFIG.attackDamage
 			spawnDamagePopup(playerAgent.position[0], 8, playerAgent.position[1], `-${MONSTER_CONFIG.attackDamage}`, 'hurt')
 			logEvent(t('hud.log.hurt', { count: MONSTER_CONFIG.attackDamage }), 'hurt')

@@ -1813,3 +1813,171 @@ describe('player mastery integration', () => {
     expect(agent.extraScanRangePerLevel).toBe(0)
   })
 })
+
+describe('player dodge', () => {
+  const baseCfg = (): PlayerAgentConfig => ({
+    exploreDistance: 50,
+    speed: 20,
+    collectRadius: 5,
+    chopDurationMs: 1_000,
+    attackRangeMeters: 20,
+    attackDamageMs: 100,
+    attackCooldownMs: 500,
+    playerAttackDamage: 10,
+    playerMaxHealth: 100,
+    killHealHealth: 10,
+    regenHealthAmount: 1,
+    regenIntervalMs: 1_000,
+    criticalHealthRatio: 0.25,
+    fleeSafeDistanceMeters: 100,
+    expBase: 100,
+    expGrowth: 1,
+    levelAttackBonus: 0,
+    levelHealthBonus: 0,
+    levelSpeedBonus: 0,
+    huntScanRangePerLevel: 5,
+    slamUnlockLevel: 99,
+    slamCooldownMs: 0,
+    slamRadius: 0,
+    slamDamageMultiplier: 0,
+    furyUnlockLevel: 99,
+    furyCooldownMs: 0,
+    furyDurationMs: 0,
+    furySwingMultiplier: 1,
+    leechUnlockLevel: 99,
+    leechRatio: 0,
+    upgradeCostBase: 999,
+    upgradeCostGrowth: 1,
+    weaponAttackPerTier: 0,
+    weaponPowerPerTier: 0,
+    reserveWood: 0,
+    playerBasePower: 50,
+    powerPerWood: 0,
+    monsterHealthPowerWeight: 1,
+    monsterAttackPowerWeight: 1,
+    huntAggroRangeMultiplier: 1,
+    huntGiveUpRangeMultiplier: 1,
+    worldRadius: 1_000,
+    collisionCheck: () => false,
+    treeResources: () => [],
+    threatSources: () => [],
+  })
+
+  it('applyDamage returns true (dodged) when dodgeChance is 1', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg())
+    agent.dodgeChance = 1
+    expect(agent.applyDamage(20)).toBe(true)
+    expect(agent.health).toBe(100) // 피해 무효
+  })
+
+  it('applyDamage returns false (not dodged) and applies damage when dodgeChance is 0', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg())
+    expect(agent.applyDamage(20)).toBe(false)
+    expect(agent.health).toBe(80)
+  })
+})
+
+describe('player skill tree integration', () => {
+  const baseCfg = (skillTree?: { branches: Record<string, { label: string; nodes: { id: string; unlockLevel: number; effects: Record<string, number | boolean> }[] }> }): PlayerAgentConfig => ({
+    exploreDistance: 50,
+    speed: 20,
+    collectRadius: 5,
+    chopDurationMs: 1_000,
+    attackRangeMeters: 20,
+    attackDamageMs: 100,
+    attackCooldownMs: 500,
+    playerAttackDamage: 10,
+    playerMaxHealth: 100,
+    killHealHealth: 10,
+    regenHealthAmount: 1,
+    regenIntervalMs: 1_000,
+    criticalHealthRatio: 0.25,
+    fleeSafeDistanceMeters: 100,
+    expBase: 100,
+    expGrowth: 1,
+    levelAttackBonus: 0,
+    levelHealthBonus: 0,
+    levelSpeedBonus: 0,
+    huntScanRangePerLevel: 5,
+    slamUnlockLevel: 99,
+    slamCooldownMs: 0,
+    slamRadius: 0,
+    slamDamageMultiplier: 0,
+    furyUnlockLevel: 99,
+    furyCooldownMs: 0,
+    furyDurationMs: 0,
+    furySwingMultiplier: 1,
+    leechUnlockLevel: 99,
+    leechRatio: 0,
+    upgradeCostBase: 999,
+    upgradeCostGrowth: 1,
+    weaponAttackPerTier: 0,
+    weaponPowerPerTier: 0,
+    reserveWood: 0,
+    playerBasePower: 50,
+    powerPerWood: 0,
+    monsterHealthPowerWeight: 1,
+    monsterAttackPowerWeight: 1,
+    huntAggroRangeMultiplier: 1,
+    huntGiveUpRangeMultiplier: 1,
+    worldRadius: 1_000,
+    collisionCheck: () => false,
+    treeResources: () => [],
+    threatSources: () => [],
+    skillTree,
+  })
+
+  const TREE = {
+    branches: {
+      attack: {
+        label: 'attack',
+        nodes: [
+          { id: 'attack.slam.cd', unlockLevel: 3, effects: { slamCooldownMultiplier: 0.5 } },
+        ],
+      },
+      defense: {
+        label: 'defense',
+        nodes: [
+          { id: 'defense.dodge', unlockLevel: 4, effects: { dodgeChance: 0.1 } },
+        ],
+      },
+    },
+  }
+
+	it('unlocks a node when its threshold level is crossed by a single addExperience call', () => {
+		const agent = createPlayerAgent([0, 0], baseCfg(TREE))
+		agent.addExperience(300) // Lv 1→2→3→4 (expBase 100, growth 1)
+		expect(agent.unlockedSkillNodes).toContain('attack.slam.cd')
+		expect(agent.unlockedSkillNodes).toContain('defense.dodge')
+		expect(agent.slamCooldownMultiplier).toBe(0.5)
+		expect(agent.dodgeChance).toBe(0.1)
+		// GameScene가 renderFrame에서 큐를 비운다. 에이전트 자체는 비우지 않음.
+		expect(agent.pendingSkillUnlocks).toContain('attack.slam.cd')
+		expect(agent.pendingSkillUnlocks).toContain('defense.dodge')
+	})
+
+  it('does not unlock when level threshold is not crossed', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg(TREE))
+    agent.addExperience(100) // Lv 1→2 only
+    expect(agent.unlockedSkillNodes).toEqual([])
+    expect(agent.slamCooldownMultiplier).toBe(1)
+    expect(agent.dodgeChance).toBe(0)
+  })
+
+  it('unlocks each node only once across multiple addExperience calls', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg(TREE))
+    agent.addExperience(300) // Lv 1→4
+    expect(agent.unlockedSkillNodes).toHaveLength(2)
+    expect(agent.slamCooldownMultiplier).toBe(0.5)
+    agent.addExperience(50) // no level-up
+    expect(agent.slamCooldownMultiplier).toBe(0.5)
+    agent.addExperience(50) // Lv 4→5 (expBase 100, growth 1)
+    expect(agent.slamCooldownMultiplier).toBe(0.5) // unchanged
+  })
+
+  it('no skill tree means no node ever unlocks', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg(undefined))
+    agent.addExperience(300)
+    expect(agent.unlockedSkillNodes).toEqual([])
+  })
+})
