@@ -75,6 +75,23 @@ export const WEAPON_CONFIG = {
   reserveWood: 10,         // 강화 후에도 유지할 비상 나무 (자동 강화가 비축을 갈취하지 않도록)
 };
 
+// 자동 스킬: 레벨 해금 + 쿨다운 자동 시전 (관전 재미의 고점)
+export const SKILL_CONFIG = {
+  // 광역 강타: 교전 중 주변 모든 적을 타격
+  slamUnlockLevel: 2,
+  slamCooldownMs: 8000,
+  slamRadius: 90,
+  slamDamageMultiplier: 1.5,
+  // 분노: 교전 중 자발 발동 — 스윙 간격 감소 (공속 증가)
+  furyUnlockLevel: 4,
+  furyCooldownMs: 15_000,
+  furyDurationMs: 5000,
+  furySwingMultiplier: 0.5,
+  // 생명 흡수: 피해량 일부 회복 (패시브)
+  leechUnlockLevel: 6,
+  leechRatio: 0.3,
+};
+
 // 昼夜循环：1 分钟 = 游戏内 1 天
 export const DAY_CYCLE_CONFIG = {
   realMsPerDay: 60_000,        // 1 分钟 = 1 游戏天
@@ -141,4 +158,21 @@ export const MONSTER_CONFIG = {
   dayScalePerDay: 0.15,
   // 사망 연출 유지 시간 (이후 시체 정리)
   deathAnimMs: 1200,
+  // 보스: bossIntervalDays마다 스폰. 체력/공격력 배율은 모델 강도에 추가 곱산.
+  bossIntervalDays: 5,
+  bossHealthMultiplier: 6,
+  bossDamageMultiplier: 1.5,
+  bossRewardWood: 60,
+  // 팩 응집: 피격당한 몬스터 주변 같은 종족을 자극해 함께 추격
+  packAggroRadius: 100,
+  packAggroDurationMs: 8000,
+  // 종족별 행동 특화: 같은 스탯이라도 느낌이 다르게 (미등록 종족은 배율 1)
+  speciesBehavior: {
+    Goblin: { speedMultiplier: 1.25, attackCooldownMultiplier: 0.8 },
+    Skeleton: { speedMultiplier: 0.85, attackDamageMultiplier: 1.5 },
+    Zombie: {},
+    Yeti: { speedMultiplier: 1.35 },
+    Giant: { attackDamageMultiplier: 1.3, attackCooldownMultiplier: 1.3 },
+    Demon: { detectionMultiplier: 1.3 },
+  } as Record<string, import('~/game/resources/monsters').SpeciesBehavior>,
 };

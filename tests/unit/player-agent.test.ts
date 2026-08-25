@@ -57,6 +57,16 @@ function makeConfig(overrides: Partial<PlayerAgentConfig> = {}): PlayerAgentConf
     levelHealthBonus: 20,
     levelSpeedBonus: 1,
     huntScanRangePerLevel: 20,
+    slamUnlockLevel: 2,
+    slamCooldownMs: 8_000,
+    slamRadius: 90,
+    slamDamageMultiplier: 1.5,
+    furyUnlockLevel: 4,
+    furyCooldownMs: 15_000,
+    furyDurationMs: 5_000,
+    furySwingMultiplier: 0.5,
+    leechUnlockLevel: 6,
+    leechRatio: 0.3,
     upgradeCostBase: 30,
     upgradeCostGrowth: 1.5,
     weaponAttackPerTier: 6,
@@ -415,6 +425,101 @@ describe('player agent', () => {
     // 사냥 직행 대신 무작위 탐색 지점을 고른다
     expect(agent.state).toBe('exploring')
     expect(agent.target).not.toEqual([300, 0])
+  })
+
+  it('auto-casts slam on every enemy inside the radius once unlocked', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0)
+    const onAttackMonster = vi.fn()
+    const inRange = makeThreat({ id: 'a', position: [10, 0], homePosition: [0, 0], activityRadius: 100, attackRadius: 20, health: 50 })
+    const alsoInRadius = makeThreat({ id: 'b', position: [60, 0], homePosition: [0, 0], activityRadius: 100, attackRadius: 2, health: 50 })
+    const outOfRadius = makeThreat({ id: 'c', position: [200, 0], homePosition: [200, 0], activityRadius: 300, attackRadius: 2, health: 50 })
+    const corpse = makeThreat({ id: 'dead', position: [30, 0], homePosition: [0, 0], activityRadius: 100, attackRadius: 2, health: 0 })
+    const idLess = makeThreat({ position: [40, 0], homePosition: [0, 0], activityRadius: 100, attackRadius: 2, health: 50 })
+    let threats = [inRange, alsoInRadius, outOfRadius, corpse, idLess]
+    const config = makeConfig({
+      attackRangeMeters: 20,
+      onAttackMonster,
+      threatSources: () => threats,
+    })
+    const agent = createPlayerAgent([0, 0], config)
+    agent.level = 2 // 광역 강타 해금
+
+    agent.update(0, 0)
+    expect(agent.state).toBe('attacking')
+    // 스윙과 무관하게 즉시 시전 (초기 lastSlamAt = -쿨다운): 반경 내 전체 타격
+    expect(onAttackMonster).toHaveBeenCalledWith('a', 26) // 17 × 1.5 → 26
+    expect(onAttackMonster).toHaveBeenCalledWith('b', 26)
+    expect(onAttackMonster).toHaveBeenCalledWith('', 26) // id 없는 위협 → 빈 문자열 폴백
+    expect(onAttackMonster).not.toHaveBeenCalledWith('c', 26)
+
+    // 쿨다운 중 → 재시도 없음 (스윙 윈도우 전이므로 일반 스윙도 없음)
+    onAttackMonster.mockClear()
+    agent.update(0, 1_000)
+    expect(onAttackMonster).not.toHaveBeenCalled()
+
+    // 비교전 상태(사냥감 부재)에서는 쿨다운이 만료돼도 시전하지 않는다
+    threats = []
+    agent.state = 'exploring'
+    agent.attackTarget = null
+    agent.update(0, 9_000)
+    expect(onAttackMonster).not.toHaveBeenCalled()
+
+    // 교전 재개 → 쿨다운 만료 상태로 즉시 시전
+    threats = [inRange]
+    agent.update(0, 10_000)
+    expect(onAttackMonster).toHaveBeenCalledWith('a', 26)
+  })
+
+  it('unleashes fury in combat and halves the swing window', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0)
+    const onAttackMonster = vi.fn()
+    const threat = makeThreat({ id: 'm1', position: [10, 0], homePosition: [0, 0], activityRadius: 100, attackRadius: 20, health: 500 })
+    let threats = [threat]
+    const config = makeConfig({
+      attackRangeMeters: 20,
+      attackDamageMs: 500,
+      attackCooldownMs: 1_000,
+      onAttackMonster,
+      threatSources: () => threats,
+    })
+    const agent = createPlayerAgent([0, 0], config)
+    agent.level = 4 // 분노 해금
+
+    agent.update(0, 0)
+    expect(agent.state).toBe('attacking')
+    expect(agent.furyActiveUntil).toBe(5_000)
+    onAttackMonster.mockClear() // t=0의 광역 강타 호출 제거
+
+    // 분노: 스윙 윈도우 1500 → 750
+    agent.update(0, 749)
+    expect(onAttackMonster).not.toHaveBeenCalled()
+    agent.update(0, 800)
+    expect(onAttackMonster).toHaveBeenCalledTimes(1)
+    expect(onAttackMonster).toHaveBeenCalledWith('m1', 17)
+
+    // 비교전 상태(적 부재)에서는 분노를 재발동하지 않는다
+    threats = []
+    agent.state = 'exploring'
+    agent.attackTarget = null
+    agent.update(0, 25_000)
+    expect(agent.furyActiveUntil).toBe(5_000)
+  })
+
+  it('leeches life from dealt damage at higher levels', () => {
+    const agent = createPlayerAgent([0, 0], makeConfig())
+    agent.health = 50
+
+    // 레벨 미달 → 회복 없음
+    agent.applyLifeLeech(20)
+    expect(agent.health).toBe(50)
+
+    agent.level = 6
+    agent.applyLifeLeech(20)
+    expect(agent.health).toBe(56) // +6 (20 × 0.3)
+
+    // 최대치 clamp
+    agent.applyLifeLeech(500)
+    expect(agent.health).toBe(agent.maxHealth)
   })
 
   it('steers around obstacles blocking the straight path', () => {

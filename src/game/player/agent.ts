@@ -55,6 +55,16 @@ export type PlayerAgentConfig = {
 	levelHealthBonus: number          // 레벨당 최대 체력 증가
 	levelSpeedBonus: number           // 레벨당 이동속도 증가
 	huntScanRangePerLevel: number     // 레벨당 선제공격 스캔 범위 추가치
+	slamUnlockLevel: number           // 광역 강타 해금 레벨
+	slamCooldownMs: number            // 광역 강타 쿨다운
+	slamRadius: number                // 광역 강타 타격 반경
+	slamDamageMultiplier: number      // 광역 강타 피해 배율 (실효 공격력 기준)
+	furyUnlockLevel: number           // 분노 해금 레벨
+	furyCooldownMs: number            // 분노 쿨다운
+	furyDurationMs: number            // 분노 지속 시간
+	furySwingMultiplier: number       // 분노 중 스윙 윈도우 배율 (낮을수록 빠름)
+	leechUnlockLevel: number          // 생명 흡수 해금 레벨
+	leechRatio: number                // 피해량 대비 회복 비율
 	upgradeCostBase: number           // 무기 첫 강화 비용 (나무)
 	upgradeCostGrowth: number         // 무기 강화 비용 증가율
 	weaponAttackPerTier: number       // 무기 티어당 공격력 증가
@@ -91,6 +101,12 @@ export type PlayerAgent = {
 	weaponTier: number
 	/** 무기 강화가 전투력에 더하는 값 (tier × weaponPowerPerTier) */
 	weaponPower: number
+	/** 마지막 광역 강타 시각 (게임 시간 ms) */
+	lastSlamAt: number
+	/** 마지막 분노 발동 시각 */
+	lastFuryAt: number
+	/** 분노 지속 종료 시각 — 이 시각까지 스윙 간격이 감소한다 */
+	furyActiveUntil: number
 	animation: 'walk' | 'interact' | 'attack' | null
 	lastCollectedTree: TreeResource | null
 	attackTarget: PlayerThreatSource | null
@@ -111,6 +127,8 @@ export type PlayerAgent = {
 	nextUpgradeCost(): number
 	/** 나무를 소비해 무기를 강화한다. 나무가 부족하면 false. */
 	upgradeWeapon(): boolean
+	/** 생명 흡수: 해준 피해의 일부를 회복한다 (해금 레벨 이상일 때). */
+	applyLifeLeech(damageDealt: number): void
 }
 
 const AREA_FAILURE_LIMIT = 2
@@ -155,6 +173,9 @@ export function createPlayerAgent(
 		attackDamage: config.playerAttackDamage,
 		weaponTier: 0,
 		weaponPower: 0,
+		lastSlamAt: -config.slamCooldownMs,
+		lastFuryAt: -config.furyCooldownMs,
+		furyActiveUntil: 0,
 		animation: 'walk',
 		lastCollectedTree: null,
 		attackTarget: null,
@@ -201,6 +222,11 @@ export function createPlayerAgent(
 			return true
 		},
 
+		applyLifeLeech(damageDealt: number) {
+			if (this.level < config.leechUnlockLevel) return
+			this.health = Math.min(this.maxHealth, this.health + Math.round(damageDealt * config.leechRatio))
+		},
+
 		update(delta, now) {
 			if (!this.playerAlive) return
 			pruneAvoidedAreas(this, now)
@@ -234,12 +260,39 @@ export function createPlayerAgent(
 				resolveCombatIntent(this, now, config)
 			}
 
+			// ===== 자동 스킬: 교전 중일 때만 시전 =====
+			const inCombat = this.state === 'attacking' || this.state === 'hunting'
+			// 광역 강타: 사거리 무관 주변 모든 적 타격
+			if (
+				this.level >= config.slamUnlockLevel
+				&& now - this.lastSlamAt >= config.slamCooldownMs
+				&& inCombat
+			) {
+				this.lastSlamAt = now
+				const slamDamage = Math.round(this.attackDamage * config.slamDamageMultiplier)
+				for (const threat of config.threatSources()) {
+					if (isDeadThreat(threat)) continue
+					if (distanceTo(this.position, threat.position) <= config.slamRadius) {
+						config.onAttackMonster?.(threat.id ?? '', slamDamage)
+					}
+				}
+			}
+			// 분노: 스윙 간격 단축 버프
+			if (
+				this.level >= config.furyUnlockLevel
+				&& now - this.lastFuryAt >= config.furyCooldownMs
+				&& inCombat
+			) {
+				this.lastFuryAt = now
+				this.furyActiveUntil = now + config.furyDurationMs
+			}
+
 			switch (this.state) {
 				case 'exploring':
 					updateExploring(this, delta, config)
 					break
 				case 'approaching':
-					updateApproaching(this, delta, config)
+					updateApproaching(this, delta, now, config)
 					break
 				case 'chopping':
 					updateChopping(this, now, config)
@@ -347,7 +400,7 @@ function updateExploring(agent: PlayerAgent, delta: number, config: PlayerAgentC
 }
 
 // ===== 向树靠近 =====
-function updateApproaching(agent: PlayerAgent, delta: number, config: PlayerAgentConfig) {
+function updateApproaching(agent: PlayerAgent, delta: number, now: number, config: PlayerAgentConfig) {
 	if (!agent.activeTree || agent.activeTree.collected) {
 		agent.activeTree = null
 		agent.state = 'exploring'
@@ -373,7 +426,7 @@ function updateApproaching(agent: PlayerAgent, delta: number, config: PlayerAgen
 		agent.state = 'chopping'
 		agent.choppingProgress = 0.01
 		agent.animation = 'interact'
-		lastTreeScan = performance.now()
+		lastTreeScan = now
 	}
 }
 
@@ -430,8 +483,9 @@ function updateAttacking(agent: PlayerAgent, now: number, config: PlayerAgentCon
 	// 面向怪物
 	agent.bearing = faceTarget(agent, liveTarget.position)
 
-	// 进度（挥砍动画）
-	const swingWindow = config.attackDamageMs + config.attackCooldownMs
+	// 进度（挥砍动画）— 분노 지속 중에는 스윙 윈도우 감소
+	const swingWindow = (config.attackDamageMs + config.attackCooldownMs)
+		* (now < agent.furyActiveUntil ? config.furySwingMultiplier : 1)
 	agent.attackingProgress = Math.min(1, (now - lastAttackSwing) / swingWindow)
 
 	// 挥砍动画结束后真正造成伤害

@@ -111,11 +111,41 @@
 			<div class="player-status__line player-status__line--threat">{{ status.threatLine || t('hud.status.none') }}</div>
 			<div class="player-status__line player-status__line--prey">{{ status.preyLine || t('hud.status.none') }}</div>
 		</div>
+		<div v-if="bossBar" class="boss-bar">
+			<div class="boss-bar__name">{{ bossBar.name }}</div>
+			<div class="boss-bar__track">
+				<div class="boss-bar__fill" :style="{ width: `${bossBar.percent}%` }"></div>
+			</div>
+		</div>
+		<div v-if="daySummary.visible" class="day-summary">
+			<div class="day-summary__title">{{ t('hud.summary.title', { day: daySummary.day }) }}</div>
+			<div class="day-summary__text">{{ t('hud.summary.text', { wood: daySummary.wood, kills: daySummary.kills, damage: daySummary.damage }) }}</div>
+		</div>
+		<div class="combat-log" aria-live="polite">
+			<div
+				v-for="entry in combatLog"
+				:key="entry.id"
+				class="combat-log__entry"
+				:class="`combat-log__entry--${entry.kind}`"
+			>{{ entry.text }}</div>
+		</div>
+		<div class="game-controls" role="group" :aria-label="'game speed'">
+			<button type="button" class="game-controls__btn" @click="paused = !paused">{{ paused ? '▶' : '⏸' }}</button>
+			<button
+				v-for="speed in [1, 2, 4]"
+				:key="speed"
+				type="button"
+				class="game-controls__btn"
+				:class="{ 'game-controls__btn--active': gameSpeed === speed }"
+				@click="gameSpeed = speed"
+			>×{{ speed }}</button>
+		</div>
 		<div v-if="gameOver" class="game-over-overlay">
 			<div class="game-over-content">
 				<h2>{{ t('gameOver.title') }}</h2>
 				<p>{{ t('gameOver.survived', { days: currentDay - 1 }) }}</p>
 				<p>{{ t(deathCause === 'slain' ? 'gameOver.slain' : 'gameOver.exhausted') }}</p>
+				<p v-if="bestRecord" class="game-over-best">{{ t('gameOver.best', { days: bestRecord.days, kills: bestRecord.kills }) }}</p>
 				<button class="game-over-btn" @click="restartGame">{{ t('gameOver.restart') }}</button>
 			</div>
 		</div>
@@ -151,6 +181,8 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import { readStoredLocale, storeLocale, type AppLocale } from '~/i18n/language'
 
+import { loadBestRecord, saveBestRecord } from '~/game/records'
+
 import {
 	COMBAT_AGGRESSION_CONFIG,
 	DEAD_TREE_CONFIG,
@@ -160,6 +192,7 @@ import {
 	MONSTER_GUARDIAN_CONFIG,
 	PLAYER_CONFIG,
 	PROGRESSION_CONFIG,
+	SKILL_CONFIG,
 	TREE_RESOURCE_CONFIG,
 	WEAPON_CONFIG,
 } from '~/config'
@@ -189,6 +222,7 @@ import {
 import {
 	createMonsterAgent,
 	createMonsterResources,
+	createBossMonster,
 	createRespawnMonster,
 	type MonsterAgent,
 	type MonsterResource,
@@ -275,14 +309,13 @@ function spawnDamagePopup(x: number, y: number, z: number, text: string, kind: '
 		id: ++popupSeq,
 		kind,
 		text,
-		createdAt: performance.now(),
+		createdAt: gameNow,
 		style: { left: `${point.left}px`, top: `${point.top}px` },
 	}]
 }
 
 function updateMonsterOverlay() {
-	const now = performance.now()
-	damagePopups.value = damagePopups.value.filter(popup => now - popup.createdAt < POPUP_LIFETIME_MS)
+	damagePopups.value = damagePopups.value.filter(popup => gameNow - popup.createdAt < POPUP_LIFETIME_MS)
 
 	if (!camera) {
 		monsterBars.value = []
@@ -439,6 +472,11 @@ let playerAnimation: PlayerAnimationController | null = null
 let playerModel: Object3D | null = null
 let renderer: WebGLRenderer | null = null
 let scene: Scene | null = null
+
+// 게임 시계: 배속/일시정지를 지원하기 위해 실시간과 분리된 누적 시간 (ms)
+let gameNow = 0
+const gameSpeed = ref(1)
+const paused = ref(false)
 let treeGroup: Group | null = null
 let treeResources: TreeResource[] = []
 const deadTreeTemplates = new Map<number, Object3D>()
@@ -467,6 +505,7 @@ const MINIMAP_SIZE = 180
 
 onMounted(() => {
 	createScene()
+	bestRecord.value = loadBestRecord(localStorage)
 })
 
 onUnmounted(() => {
@@ -652,8 +691,8 @@ function createEnvObjects(targetScene: Scene) {
 // 리스폰 대기열: 처치된 몬스터의 모델 인덱스와 부활 예정일
 const pendingRespawns: { dueDay: number; modelIndex: number }[] = []
 let respawnSeq = 0
-// 플레이어 스윙 → 다음 updateMonsters에서 FSM이 처리할 유일한 피해 패킷
-let pendingPlayerHit: { id: string; damage: number } | null = null
+// 플레이어 스윙/광역 스킬 → 다음 updateMonsters에서 FSM이 처리할 피해 패킷 목록
+let pendingPlayerHits: { id: string; damage: number }[] = []
 // 처치 보상 중복 지급 방지 + 사망 연출 중인 시체 (id → 연출 시작 시각)
 const settledKills = new Set<string>()
 const dyingMonsters = new Map<string, number>()
@@ -666,7 +705,7 @@ function createMonsters(targetScene: Scene) {
 	pendingRespawns.length = 0
 	settledKills.clear()
 	dyingMonsters.clear()
-	pendingPlayerHit = null
+	pendingPlayerHits = []
 
 	// 每个怪物单独加载 GLB（蒙皮骨骼不能 clone）
 	monsterResources.forEach(resource => {
@@ -704,10 +743,12 @@ function spawnMonsterVisual(resource: MonsterResource, targetScene: Scene) {
 	)
 }
 
-// 새 날이 밝으면 기한이 된 리스폰을 처리한다. 총 몬스터 수는 설정치를 넘지 않는다.
+// 새 날이 밝으면 기한이 된 리스폰을 처리한다. 총 몬스터 수는 설정치를 넘지 않는다 (보스 제외).
 function processRespawns() {
 	if (!scene) return
-	while (pendingRespawns.length > 0 && monsterAgents.length < MONSTER_CONFIG.count) {
+	while (pendingRespawns.length > 0
+		&& monsterAgents.filter(agent => !agent.resource.isBoss).length < MONSTER_CONFIG.count
+	) {
 		const task = pendingRespawns[0]
 		if (task.dueDay > currentDay.value) break
 		pendingRespawns.shift()
@@ -718,6 +759,37 @@ function processRespawns() {
 			currentDay.value,
 		)
 		spawnMonsterVisual(resource, scene)
+	}
+}
+
+// ===== 보스: bossIntervalDays마다 스폰, 상시 추격, 전용 HP바 =====
+const activeBossId = ref<string | null>(null)
+const bossBar = ref<{ name: string; percent: number } | null>(null)
+
+function spawnBoss(dayNumber: number) {
+	if (!scene) return
+	const resource = createBossMonster(MONSTER_CONFIG, `boss-${dayNumber}`, dayNumber)
+	spawnMonsterVisual(resource, scene)
+	activeBossId.value = resource.id
+	const message = t('hud.log.bossSpawn')
+	showToast(message)
+	logEvent(message, 'boss')
+}
+
+function updateBossBar() {
+	const id = activeBossId.value
+	if (!id) {
+		bossBar.value = null
+		return
+	}
+	const agent = monsterAgents.find(candidate => candidate.resource.id === id)
+	if (!agent || agent.resource.health <= 0) {
+		bossBar.value = null
+		return
+	}
+	bossBar.value = {
+		name: agent.resource.modelName,
+		percent: Math.max(0, Math.round((agent.resource.health / agent.resource.maxHealth) * 100)),
 	}
 }
 
@@ -745,7 +817,9 @@ function handlePlayerAttack(monsterId: string, damage: number) {
 	const agent = monsterAgents.find(candidate => candidate.resource.id === monsterId)
 	if (!agent || agent.resource.health <= 0) return
 	spawnDamagePopup(agent.position[0], 8, agent.position[1], `-${damage}`, 'damage')
-	pendingPlayerHit = { id: monsterId, damage }
+	pendingPlayerHits.push({ id: monsterId, damage })
+	// 생명 흡수 스킬: 해준 피해의 일부 회복
+	playerAgent?.applyLifeLeech(damage)
 }
 
 // 처치 정산: 나무 보상/체력 회복/경험치/리스폰 예약 (몬스터당 정확히 1회)
@@ -753,12 +827,26 @@ function settleKill(agent: MonsterAgent) {
 	if (settledKills.has(agent.resource.id)) return
 	settledKills.add(agent.resource.id)
 	monsterKills.value += 1
-	awardWood(Math.max(1, Math.round(agent.resource.maxHealth * 0.3)))
+	dayKills += 1
+	// 보스는 고정 보상 (maxHealth 비례 보상은 일반 몬스터 전용 — 보스 체력이 커서 경제가 깨진다)
+	const reward = agent.resource.isBoss
+		? MONSTER_CONFIG.bossRewardWood
+		: Math.max(1, Math.round(agent.resource.maxHealth * 0.3))
+	awardWood(reward)
+	if (agent.resource.isBoss) {
+		logEvent(t('hud.log.bossKill', { count: reward }), 'boss')
+		showToast(t('hud.log.bossKill', { count: reward }))
+		activeBossId.value = null
+	} else {
+		logEvent(t('hud.log.kill', { model: agent.resource.modelName, count: reward }), 'kill')
+	}
 	// 처치 보상으로 체력 회복 + 경험치 (레벨업 시 공격력/체력/속도 증가)
 	playerAgent?.applyKillHeal()
 	playerAgent?.addExperience(agent.resource.maxHealth)
-	// 하루 뒤 같은 티어의 몬스터가 리스폰된다 (일차 스케일링 적용)
-	pendingRespawns.push({ dueDay: currentDay.value + 1, modelIndex: agent.resource.modelIndex })
+	// 하루 뒤 같은 티어의 몬스터가 리스폰된다 (보스는 스케줄 스폰 — 리스폰 예약 제외)
+	if (!agent.resource.isBoss) {
+		pendingRespawns.push({ dueDay: currentDay.value + 1, modelIndex: agent.resource.modelIndex })
+	}
 }
 
 // 结算 wood 报酬并刷新 HUD + 토스트 알림
@@ -795,6 +883,58 @@ function triggerKillPulse() {
 	killsPulseTimer = setTimeout(() => {
 		killsPulsing.value = false
 	}, 700)
+}
+
+// ===== 전투 로그 피드: 최근 이벤트를 좌측 하단에 스트리밍 =====
+type LogEntry = { id: number; text: string; kind: 'kill' | 'hurt' | 'level' | 'day' | 'boss' | 'skill'; createdAt: number }
+const combatLog = ref<LogEntry[]>([])
+let logSeq = 0
+const LOG_TTL_MS = 7_000
+const LOG_MAX_ENTRIES = 6
+
+function logEvent(text: string, kind: LogEntry['kind']) {
+	combatLog.value = [...combatLog.value, { id: ++logSeq, text, kind, createdAt: gameNow }]
+	if (combatLog.value.length > LOG_MAX_ENTRIES) {
+		combatLog.value = combatLog.value.slice(-LOG_MAX_ENTRIES)
+	}
+}
+
+function pruneCombatLog() {
+	if (!combatLog.value.length) return
+	combatLog.value = combatLog.value.filter(entry => gameNow - entry.createdAt < LOG_TTL_MS)
+}
+
+// ===== 일차 요약: 하루 동안의 성과를 새 날 시작 때 카드로 표시 =====
+const daySummary = ref({ visible: false, day: 0, wood: 0, kills: 0, damage: 0 })
+let dayWoodGained = 0
+let dayKills = 0
+let dayDamageTaken = 0
+let summaryTimer: ReturnType<typeof setTimeout> | null = null
+
+function showDaySummary() {
+	daySummary.value = {
+		visible: true,
+		day: Math.max(1, currentDay.value - 1),
+		wood: dayWoodGained,
+		kills: dayKills,
+		damage: dayDamageTaken,
+	}
+	dayWoodGained = 0
+	dayKills = 0
+	dayDamageTaken = 0
+	if (summaryTimer) clearTimeout(summaryTimer)
+	summaryTimer = setTimeout(() => {
+		daySummary.value = { ...daySummary.value, visible: false }
+	}, 4_000)
+}
+
+// ===== 최고 기록 =====
+const bestRecord = ref<{ days: number; kills: number } | null>(null)
+function recordRun() {
+	bestRecord.value = saveBestRecord(localStorage, {
+		days: Math.max(0, currentDay.value - 1),
+		kills: monsterKills.value,
+	})
 }
 
 // 从场景、动画控制器、Agent 列表中移除死亡怪物并释放资源
@@ -864,6 +1004,16 @@ function createPlayer(targetScene: Scene) {
 		huntAggroRangeMultiplier: COMBAT_AGGRESSION_CONFIG.huntAggroRangeMultiplier,
 		huntGiveUpRangeMultiplier: COMBAT_AGGRESSION_CONFIG.huntGiveUpRangeMultiplier,
 		huntScanRangePerLevel: PROGRESSION_CONFIG.huntScanRangePerLevel,
+		slamUnlockLevel: SKILL_CONFIG.slamUnlockLevel,
+		slamCooldownMs: SKILL_CONFIG.slamCooldownMs,
+		slamRadius: SKILL_CONFIG.slamRadius,
+		slamDamageMultiplier: SKILL_CONFIG.slamDamageMultiplier,
+		furyUnlockLevel: SKILL_CONFIG.furyUnlockLevel,
+		furyCooldownMs: SKILL_CONFIG.furyCooldownMs,
+		furyDurationMs: SKILL_CONFIG.furyDurationMs,
+		furySwingMultiplier: SKILL_CONFIG.furySwingMultiplier,
+		leechUnlockLevel: SKILL_CONFIG.leechUnlockLevel,
+		leechRatio: SKILL_CONFIG.leechRatio,
 		upgradeCostBase: WEAPON_CONFIG.upgradeCostBase,
 		upgradeCostGrowth: WEAPON_CONFIG.upgradeCostGrowth,
 		weaponAttackPerTier: WEAPON_CONFIG.attackPerTier,
@@ -916,13 +1066,22 @@ function renderFrame() {
 		return
 	}
 
-	const delta = clock.getDelta()
-	const now = performance.now()
+	// 배속/일시정지가 적용된 게임 시간 (일시정지 중에도 getDelta는 호출해 누적을 방지한다)
+	const rawDelta = clock.getDelta()
+	const delta = paused.value ? 0 : rawDelta * gameSpeed.value
+	gameNow += delta * 1000
+	const now = gameNow
 
 	// 1. 更新昼夜循环
 	const dayResult = dayCycle?.update(delta * 1000)
 	if (dayResult?.isNewDay) {
 		currentDay.value = dayResult.dayNumber
+		showDaySummary()
+		logEvent(t('hud.log.day', { day: dayResult.dayNumber }), 'day')
+		// 주기 보스 스폰
+		if (dayResult.dayNumber % MONSTER_CONFIG.bossIntervalDays === 0) {
+			spawnBoss(dayResult.dayNumber)
+		}
 		// 每天扣减木头
 		playerAgent.woodCollected -= DAY_CYCLE_CONFIG.woodConsumedPerDay
 		if (playerAgent.woodCollected <= 0) {
@@ -930,6 +1089,7 @@ function renderFrame() {
 			playerAlive.value = false
 			deathCause.value = 'starvation'
 			gameOver.value = true
+			recordRun()
 		}
 	}
 
@@ -944,25 +1104,43 @@ function renderFrame() {
 	// 2. 更新玩家
 	const prevWood = playerAgent.woodCollected
 	const prevAnim = playerAgent.animation
+	const prevLevel = playerAgent.level
 	const prevWeaponTier = playerAgent.weaponTier
 	const prevUpgradeCost = playerAgent.nextUpgradeCost()
+	const prevSlamAt = playerAgent.lastSlamAt
+	const prevFuryUntil = playerAgent.furyActiveUntil
 
 	playerAgent.update(delta, now)
 	syncPlayerVisuals()
 
 	if (playerAgent.woodCollected !== prevWood) {
 		woodCount.value = Math.max(0, playerAgent.woodCollected)
+		// 일일 성과 집계: 증가분만 가산 (소모/강화는 집계에서 제외)
+		if (playerAgent.woodCollected > prevWood) dayWoodGained += playerAgent.woodCollected - prevWood
 	}
 	// 자동 무기 강화가 일어나면 토스트로 알린다 (나무가 말없이 사라지는 것처럼 보이지 않게)
 	if (playerAgent.weaponTier > prevWeaponTier) {
 		showToast(t('hud.combat.upgrade', { tier: playerAgent.weaponTier, count: prevUpgradeCost }))
 	}
+	// 레벨업 로그
+	if (playerAgent.level > prevLevel) {
+		logEvent(t('hud.log.levelup', { level: playerAgent.level }), 'level')
+	}
+	// 스킬 시전 로그
+	if (playerAgent.lastSlamAt > prevSlamAt) {
+		logEvent(t('hud.log.slam'), 'skill')
+	}
+	if (playerAgent.furyActiveUntil > prevFuryUntil) {
+		logEvent(t('hud.log.fury'), 'skill')
+	}
 	choppingProgress.value = playerAgent.choppingProgress
 	attackingProgress.value = playerAgent.attackingProgress
 	updatePlayerStatus()
 	updateMonsterOverlay()
+	updateBossBar()
+	pruneCombatLog()
 	if (playerAgent.lastCollectedTree) {
-		replaceTreeWithDeadModel(playerAgent.lastCollectedTree)
+		replaceTreeWithDeadModel(playerAgent.lastCollectedTree, now)
 		playerAgent.lastCollectedTree = null
 	}
 	if (playerAgent.animation !== prevAnim && playerAnimation) {
@@ -973,7 +1151,7 @@ function renderFrame() {
 	updateMonsters(delta, now)
 
 	// 4. 现有系统
-	updateFadingTrees()
+	updateFadingTrees(now)
 	playerAnimation?.update(delta)
 	updateCamera()
 	renderer.render(scene, camera)
@@ -1000,18 +1178,37 @@ function updateMonsters(delta: number, now: number) {
 			|| playerAgent.state === 'hunting',
 		playerIsFleeing: playerAgent.state === 'fleeing',
 		isNight: dayCycle?.state.isNight ?? false,
-		incomingPlayerHit: pendingPlayerHit,
+		incomingPlayerHits: pendingPlayerHits,
 		onAttackPlayer: () => {
 			// 몬스터 공격: 나무 대신 체력을 깎는다 (HP 0 = 사망)
 			if (!playerAgent) return
 			playerAgent.applyDamage(MONSTER_CONFIG.attackDamage)
+			dayDamageTaken += MONSTER_CONFIG.attackDamage
 			spawnDamagePopup(playerAgent.position[0], 8, playerAgent.position[1], `-${MONSTER_CONFIG.attackDamage}`, 'hurt')
+			logEvent(t('hud.log.hurt', { count: MONSTER_CONFIG.attackDamage }), 'hurt')
 			if (!playerAgent.playerAlive) {
 				deathCause.value = 'slain'
 				playerAlive.value = false
 				gameOver.value = true
+				recordRun()
 			}
 		},
+	}
+
+	// 팩 응집: 피격당한 몬스터와 같은 종족이 근처 있으면 함께 자극받아 추격한다
+	for (const hit of pendingPlayerHits) {
+		const target = monsterAgents.find(candidate => candidate.resource.id === hit.id)
+		if (!target) continue
+		for (const ally of monsterAgents) {
+			if (ally.resource.modelName !== target.resource.modelName) continue
+			const dist = Math.hypot(
+				ally.position[0] - target.position[0],
+				ally.position[1] - target.position[1],
+			)
+			if (dist <= MONSTER_CONFIG.packAggroRadius) {
+				ally.provokedUntil = now + MONSTER_CONFIG.packAggroDurationMs
+			}
+		}
 	}
 
 	for (const agent of monsterAgents) {
@@ -1029,7 +1226,7 @@ function updateMonsters(delta: number, now: number) {
 		anim?.play(agent.animation as any)
 		anim?.update(delta)
 	}
-	pendingPlayerHit = null
+	pendingPlayerHits = []
 
 	// 사망 연출 종료 → 시체 정리 (죽는 애니메이션이 영구 반복되는 문제 방지)
 	for (const [monsterId, startedAt] of [...dyingMonsters]) {
@@ -1056,7 +1253,7 @@ function checkCollision(position: PlanePoint): boolean {
 	return false
 }
 
-function replaceTreeWithDeadModel(tree: TreeResource) {
+function replaceTreeWithDeadModel(tree: TreeResource, now: number) {
 	const liveObject = treeObjects.get(tree.id)
 	const templateIndex = tree.modelIndex % TREE_RESOURCE_CONFIG.deadModelUrls.length
 	const deadTemplate = deadTreeTemplates.get(templateIndex)
@@ -1079,11 +1276,10 @@ function replaceTreeWithDeadModel(tree: TreeResource) {
 	deadObject.add(model)
 	deadObject.position.set(tree.position[0], 0, tree.position[1])
 	treeGroup?.add(deadObject)
-	fadingTrees.push({ object: deadObject, createdAt: performance.now() })
+	fadingTrees.push({ object: deadObject, createdAt: now })
 }
 
-function updateFadingTrees() {
-	const now = performance.now()
+function updateFadingTrees(now: number) {
 	const { lingerMs, fadeMs } = DEAD_TREE_CONFIG
 	const toRemove: number[] = []
 
@@ -1301,6 +1497,7 @@ function restartGame() {
 	gameOver.value = false
 	deathCause.value = 'starvation'
 	lowWoodWarning.value = false
+	bestRecord.value = loadBestRecord(localStorage)
 
 	createScene()
 }
@@ -1352,7 +1549,7 @@ function disposeScene() {
 	pendingRespawns.length = 0
 	settledKills.clear()
 	dyingMonsters.clear()
-	pendingPlayerHit = null
+	pendingPlayerHits = []
 	monsterBars.value = []
 	damagePopups.value = []
 	fadingTrees.length = 0
@@ -1856,6 +2053,180 @@ function disposeScene() {
 		background: rgba(53, 244, 255, 0.3);
 		box-shadow: 0 0 20px rgba(53, 244, 255, 0.3);
 	}
+}
+
+// 보스 상단 HP바
+.boss-bar {
+	position: absolute;
+	top: 64px;
+	left: 50%;
+	z-index: 8;
+	width: min(420px, 60vw);
+	transform: translateX(-50%);
+	text-align: center;
+	pointer-events: none;
+}
+
+.boss-bar__name {
+	margin-bottom: 4px;
+	color: #ff6bd6;
+	font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	font-size: 13px;
+	font-weight: 800;
+	letter-spacing: 0.2em;
+	text-shadow: 0 0 12px rgba(255, 107, 214, 0.6);
+}
+
+.boss-bar__track {
+	height: 10px;
+	overflow: hidden;
+	border: 1px solid rgba(255, 107, 214, 0.55);
+	border-radius: 999px;
+	background: rgba(3, 12, 24, 0.8);
+}
+
+.boss-bar__fill {
+	height: 100%;
+	border-radius: inherit;
+	background: linear-gradient(90deg, #ff4444, #ff6bd6);
+	box-shadow: 0 0 14px rgba(255, 107, 214, 0.6);
+	transition: width 0.15s linear;
+}
+
+.game-controls {
+	position: absolute;
+	right: 20px;
+	bottom: 20px;
+	z-index: 10;
+	display: flex;
+	gap: 6px;
+}
+
+.game-controls__btn {
+	min-width: 40px;
+	padding: 6px 10px;
+	border: 1px solid rgba(53, 244, 255, 0.38);
+	border-radius: 8px;
+	background: rgba(3, 12, 24, 0.72);
+	color: #dffcff;
+	cursor: pointer;
+	font: 700 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+	backdrop-filter: blur(12px);
+
+	&--active {
+		background: #35f4ff;
+		color: #031018;
+	}
+
+	&:hover {
+		background: rgba(53, 244, 255, 0.15);
+	}
+
+	&--active:hover {
+		background: #35f4ff;
+	}
+}
+
+.combat-log {
+	position: absolute;
+	left: 20px;
+	bottom: 20px;
+	z-index: 5;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	max-width: 320px;
+	pointer-events: none;
+}
+
+.combat-log__entry {
+	padding: 3px 10px;
+	border-radius: 6px;
+	background: rgba(3, 12, 24, 0.6);
+	color: #dffcff;
+	font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	font-size: 11px;
+	line-height: 1.5;
+	animation: log-entry-in 0.2s ease-out;
+}
+
+.combat-log__entry--kill {
+	color: #ffd166;
+}
+
+.combat-log__entry--hurt {
+	color: #ff8c87;
+}
+
+.combat-log__entry--level {
+	color: #7dffa8;
+	font-weight: 700;
+}
+
+.combat-log__entry--skill {
+	color: #6bb8ff;
+	font-weight: 700;
+}
+
+.combat-log__entry--boss {
+	color: #ff6bd6;
+	font-weight: 700;
+}
+
+@keyframes log-entry-in {
+	from {
+		opacity: 0;
+		transform: translateX(-8px);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(0);
+	}
+}
+
+.day-summary {
+	position: absolute;
+	top: 64px;
+	left: 50%;
+	z-index: 8;
+	padding: 12px 24px;
+	border: 1px solid rgba(255, 200, 87, 0.5);
+	border-radius: 12px;
+	background: rgba(3, 12, 24, 0.82);
+	text-align: center;
+	transform: translateX(-50%);
+	backdrop-filter: blur(12px);
+	animation: summary-in 0.3s ease-out;
+}
+
+.day-summary__title {
+	font-size: 14px;
+	font-weight: 800;
+	letter-spacing: 0.08em;
+	color: #ffc857;
+}
+
+.day-summary__text {
+	margin-top: 4px;
+	font-size: 12px;
+	color: #dffcff;
+	opacity: 0.85;
+}
+
+@keyframes summary-in {
+	from {
+		opacity: 0;
+		transform: translateX(-50%) translateY(-8px);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(-50%) translateY(0);
+	}
+}
+
+.game-over-best {
+	color: #ffc857 !important;
+	font-weight: 700;
 }
 
 @media (max-width: 600px) {

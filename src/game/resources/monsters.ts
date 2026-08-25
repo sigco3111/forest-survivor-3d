@@ -18,6 +18,16 @@ export type MonsterResource = {
 	attackCooldownMs: number
 	activityRadius: number
 	hitStunMs: number
+	/** 보스: 벌목과 무관하게 상시 추격하고 전용 보상을 준다 */
+	isBoss: boolean
+}
+
+/** 종족별 행동 특화 배율 (기본 1) */
+export type SpeciesBehavior = {
+	speedMultiplier?: number
+	attackDamageMultiplier?: number
+	attackCooldownMultiplier?: number
+	detectionMultiplier?: number
 }
 
 export type MonsterAgentState = 'idle' | 'patrol' | 'tendPlants' | 'chase' | 'attack' | 'hit' | 'death'
@@ -30,10 +40,10 @@ export type MonsterUpdateContext = {
 	/** 밤 여부. 밤에는 경계(탐지) 범위가 nightDetectionMultiplier배로 확대된다. */
 	isNight?: boolean
 	/**
-	 * 플레이어의 스윙이 이 프레임에 겨냥한 몬스터. 유일한 플레이어 공격 경로다.
+	 * 플레이어의 스윙(및 광역 스킬)이 이 프레임에 겨냥한 몬스터 목록. 유일한 플레이어 공격 경로다.
 	 * 스윙 쿨다운(플레이어 에이전트)이 공격 빈도를 제한하므로 몬스터 쿨다운과 경쟁하지 않는다.
 	 */
-	incomingPlayerHit?: { id: string; damage: number }
+	incomingPlayerHits?: { id: string; damage: number }[]
 	onAttackPlayer: () => void
 }
 
@@ -47,6 +57,8 @@ export type MonsterAgent = {
 	lastAttackTime: number
 	stateTimer: number
 	hitTimer: number
+	/** 팩 응집: 이 시각까지 플레이어를 추격한다 (동족 피격 등으로 자극받음) */
+	provokedUntil: number
 	tendTarget: PlanePoint | null
 	tendTimer: number
 	plantCallback: ((position: PlanePoint) => void) | null
@@ -73,6 +85,14 @@ type MonsterConfig = {
 	strengthMultipliers?: Record<string, number>
 	/** 리스폰 몬스터 스케일링: 경과 일차당 체력/공격력 증가율 */
 	dayScalePerDay?: number
+	/** 보스 스탯 배율 (체력/공격력) */
+	bossHealthMultiplier?: number
+	bossDamageMultiplier?: number
+	/** 종족별 행동 특화 배율 */
+	speciesBehavior?: Record<string, SpeciesBehavior>
+	/** 팩 응집: 피격당한 몬스터 주변 같은 종족을 자극하는 반경/지속시간 */
+	packAggroRadius?: number
+	packAggroDurationMs?: number
 }
 
 function seededRandom(seed: number) {
@@ -84,6 +104,11 @@ function seededRandom(seed: number) {
 }
 
 const modelNames = ['Demon', 'Giant', 'Goblin', 'Skeleton', 'Yeti', 'Zombie']
+
+/** 종족별 행동 배율 조회 (미등록 종족은 모두 1) */
+function speciesOf(config: MonsterConfig, modelName: string): SpeciesBehavior {
+	return config.speciesBehavior?.[modelName] ?? {}
+}
 
 export function createMonsterResources(config: MonsterConfig): MonsterResource[] {
 	const monsters: MonsterResource[] = []
@@ -99,6 +124,7 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 		const scale = config.modelScale * (minScale + rand() * (maxScale - minScale))
 		const modelName = modelNames[modelIndex] || modelNames[0]
 		const strengthMultiplier = config.strengthMultipliers?.[modelName] ?? 1
+		const behavior = speciesOf(config, modelName)
 
 		monsters.push({
 			id: `monster-${i}`,
@@ -109,18 +135,55 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 			scale,
 			homePosition: [...position],
 			patrolRadius: config.patrolRadius * (0.7 + rand() * 0.6),
-			speed: config.speed * (0.8 + rand() * 0.4),
-			detectionRadius: config.detectionRadius,
+			speed: config.speed * (0.8 + rand() * 0.4) * (behavior.speedMultiplier ?? 1),
+			detectionRadius: Math.round(config.detectionRadius * (behavior.detectionMultiplier ?? 1)),
 			health: Math.round(config.health * strengthMultiplier),
 			maxHealth: Math.round(config.health * strengthMultiplier),
-			attackDamage: Math.round(config.attackDamage * strengthMultiplier),
-			attackCooldownMs: config.attackCooldownMs,
+			attackDamage: Math.round(config.attackDamage * strengthMultiplier * (behavior.attackDamageMultiplier ?? 1)),
+			attackCooldownMs: Math.round(config.attackCooldownMs * (behavior.attackCooldownMultiplier ?? 1)),
 			activityRadius: config.activityRadius * (0.85 + rand() * 0.3),
 			hitStunMs: config.hitStunMs,
+			isBoss: false,
 		})
 	}
 
 	return monsters
+}
+
+/**
+ * 주기 보스: Giant 모델 고정, 일반 몬스터 대비 대폭 강화된 스탯.
+ * 위치는 Math.random 기반 (리스폰과 같은 의도적 비결정론 예외).
+ */
+export function createBossMonster(config: MonsterConfig, id: string, dayNumber: number): MonsterResource {
+	const modelName = 'Giant'
+	const modelIndex = config.modelUrls.length > 1 ? 1 : 0
+	const base = config.strengthMultipliers?.[modelName] ?? 1
+	const dayScale = 1 + (dayNumber - 1) * (config.dayScalePerDay ?? 0)
+	const healthMultiplier = base * (config.bossHealthMultiplier ?? 6)
+	const damageMultiplier = base * (config.bossDamageMultiplier ?? 1.5)
+	const maxRadius = config.radiusMeters * 0.8
+	const angle = Math.random() * Math.PI * 2
+	const dist = Math.sqrt(Math.random()) * maxRadius
+
+	return {
+		id,
+		modelName,
+		modelIndex,
+		position: [Math.cos(angle) * dist, Math.sin(angle) * dist],
+		rotation: Math.random() * Math.PI * 2,
+		scale: config.modelScale * 1.6,
+		homePosition: [Math.cos(angle) * dist, Math.sin(angle) * dist],
+		patrolRadius: config.patrolRadius,
+		speed: config.speed,
+		detectionRadius: config.detectionRadius,
+		health: Math.round(config.health * healthMultiplier * dayScale),
+		maxHealth: Math.round(config.health * healthMultiplier * dayScale),
+		attackDamage: Math.round(config.attackDamage * damageMultiplier * dayScale),
+		attackCooldownMs: config.attackCooldownMs,
+		activityRadius: config.activityRadius,
+		hitStunMs: config.hitStunMs,
+		isBoss: true,
+	}
 }
 
 /**
@@ -136,6 +199,7 @@ export function createRespawnMonster(
 ): MonsterResource {
 	const modelName = modelNames[modelIndex] ?? modelNames[0]
 	const strengthMultiplier = config.strengthMultipliers?.[modelName] ?? 1
+	const behavior = speciesOf(config, modelName)
 	const dayScale = 1 + (dayNumber - 1) * (config.dayScalePerDay ?? 0)
 	const maxRadius = config.radiusMeters * 0.8
 	const angle = Math.random() * Math.PI * 2
@@ -151,14 +215,15 @@ export function createRespawnMonster(
 		scale: config.modelScale * (minScale + Math.random() * (maxScale - minScale)),
 		homePosition: [Math.cos(angle) * dist, Math.sin(angle) * dist],
 		patrolRadius: config.patrolRadius * (0.7 + Math.random() * 0.6),
-		speed: config.speed * (0.8 + Math.random() * 0.4),
-		detectionRadius: config.detectionRadius,
+		speed: config.speed * (0.8 + Math.random() * 0.4) * (behavior.speedMultiplier ?? 1),
+		detectionRadius: Math.round(config.detectionRadius * (behavior.detectionMultiplier ?? 1)),
 		health: Math.round(config.health * strengthMultiplier * dayScale),
 		maxHealth: Math.round(config.health * strengthMultiplier * dayScale),
-		attackDamage: Math.round(config.attackDamage * strengthMultiplier * dayScale),
-		attackCooldownMs: config.attackCooldownMs,
+		attackDamage: Math.round(config.attackDamage * strengthMultiplier * dayScale * (behavior.attackDamageMultiplier ?? 1)),
+		attackCooldownMs: Math.round(config.attackCooldownMs * (behavior.attackCooldownMultiplier ?? 1)),
 		activityRadius: config.activityRadius * (0.85 + Math.random() * 0.3),
 		hitStunMs: config.hitStunMs,
+		isBoss: false,
 	}
 }
 
@@ -176,6 +241,7 @@ export function createMonsterAgent(
 		lastAttackTime: 0,
 		stateTimer: 0,
 		hitTimer: 0,
+		provokedUntil: 0,
 		tendTarget: null,
 		tendTimer: 0,
 		plantCallback: plantCallback ?? null,
@@ -190,8 +256,8 @@ export function createMonsterAgent(
 			}
 
 			// 플레이어의 스윙 처리: 피해 적용 → 사망 또는 경직(hit)
-			const incoming = context.incomingPlayerHit
-			if (incoming && incoming.id === this.resource.id && incoming.damage > 0) {
+			const incoming = context.incomingPlayerHits?.find(hit => hit.id === this.resource.id)
+			if (incoming && incoming.damage > 0) {
 				this.resource.health -= incoming.damage
 				if (this.resource.health <= 0) {
 					this.state = 'death'
@@ -216,10 +282,10 @@ export function createMonsterAgent(
 
 			switch (this.state) {
 				case 'idle':
-					updateIdle(this, delta, distToPlayer, playerDistanceFromHome, context)
+					updateIdle(this, delta, distToPlayer, playerDistanceFromHome, context, now)
 					break
 				case 'patrol':
-					updatePatrol(this, delta, distToPlayer, playerDistanceFromHome, context)
+					updatePatrol(this, delta, distToPlayer, playerDistanceFromHome, context, now)
 					break
 				case 'tendPlants':
 					updateTendPlants(this, delta, now)
@@ -245,9 +311,10 @@ function updateIdle(
 	distToPlayer: number,
 	playerDistanceFromHome: number,
 	context: MonsterUpdateContext,
+	now: number,
 ) {
-	// 只有玩家在砍树且在警觉范围内才追击
-	if (canChasePlayer(agent, distToPlayer, playerDistanceFromHome, context)) {
+	// 벌목 중이거나 팩 응집으로 자극받았거나 보스면 추격
+	if (canChasePlayer(agent, distToPlayer, playerDistanceFromHome, context, now)) {
 		agent.state = 'chase'
 		agent.animation = 'run'
 		return
@@ -277,9 +344,9 @@ function updatePatrol(
 	distToPlayer: number,
 	playerDistanceFromHome: number,
 	context: MonsterUpdateContext,
+	now: number,
 ) {
-	// 只有玩家在砍树且在警觉范围内才追击
-	if (canChasePlayer(agent, distToPlayer, playerDistanceFromHome, context)) {
+	if (canChasePlayer(agent, distToPlayer, playerDistanceFromHome, context, now)) {
 		agent.state = 'chase'
 		agent.animation = 'run'
 		return
@@ -340,8 +407,12 @@ function updateChase(
 	distToPlayer: number,
 	context: MonsterUpdateContext,
 ) {
-	// 玩家停止砍树且没有逃跑 → 失去兴趣
-	if ((!context.playerIsChopping && !context.playerIsFleeing) || !context.playerAlive) {
+	// 추격 유지 조건: 벌목 중/도망 중/팩 자극 만료 전/보스 — 어느 것도 아니면 흥미 상실
+	const engaged = context.playerIsChopping
+		|| context.playerIsFleeing
+		|| now < agent.provokedUntil
+		|| agent.resource.isBoss
+	if (!engaged || !context.playerAlive) {
 		agent.state = 'idle'
 		agent.animation = 'idle'
 		agent.stateTimer = 0
@@ -382,8 +453,12 @@ function updateAttack(
 ) {
 	agent.bearing = faceTarget(agent, context.playerPosition)
 
-	// 玩家停止砍树且没有逃跑 → 放弃攻击
-	if ((!context.playerIsChopping && !context.playerIsFleeing) || !context.playerAlive) {
+	// 攻击持续 조건 (보스는 예외 — 상시 추격)
+	const engaged = context.playerIsChopping
+		|| context.playerIsFleeing
+		|| now < agent.provokedUntil
+		|| agent.resource.isBoss
+	if (!engaged || !context.playerAlive) {
 		agent.state = 'idle'
 		agent.animation = 'idle'
 		agent.stateTimer = 0
@@ -432,7 +507,12 @@ function updateHit(
 	agent.hitTimer = 0
 	if (
 		context.playerAlive
-		&& (context.playerIsChopping || context.playerIsFleeing)
+		&& (
+			context.playerIsChopping
+			|| context.playerIsFleeing
+			|| now < agent.provokedUntil
+			|| agent.resource.isBoss
+		)
 		&& distToPlayer < effectiveDetectionRadius(context)
 		&& playerDistanceFromHome <= agent.resource.activityRadius
 	) {
@@ -460,9 +540,11 @@ function canChasePlayer(
 	distToPlayer: number,
 	playerDistanceFromHome: number,
 	context: MonsterUpdateContext,
+	now: number,
 ): boolean {
+	const engaged = context.playerIsChopping || now < agent.provokedUntil || agent.resource.isBoss
 	return context.playerAlive
-		&& context.playerIsChopping
+		&& engaged
 		&& distToPlayer < effectiveDetectionRadius(context)
 		&& playerDistanceFromHome <= agent.resource.activityRadius
 }

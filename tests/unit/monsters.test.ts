@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createMonsterAgent,
   createMonsterResources,
+  createBossMonster,
   createRespawnMonster,
   effectiveDetectionRadius,
   type MonsterResource,
@@ -27,6 +28,7 @@ function makeResource(overrides: Partial<MonsterResource> = {}): MonsterResource
     attackCooldownMs: 1_500,
     activityRadius: 200,
     hitStunMs: 700,
+    isBoss: false,
     ...overrides,
   }
 }
@@ -140,6 +142,162 @@ describe('monster resources', () => {
     const fallback = createRespawnMonster(withoutMultipliers, 'monster-respawn-3', 99, 1)
     expect(fallback.modelName).toBe('Demon')
     expect(fallback.health).toBe(100)
+  })
+
+  it('createBossMonster builds a heavily scaled always-aggro boss', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const config = {
+      modelUrls: ['/demon.glb', '/giant.glb'],
+      seed: 7,
+      count: 1,
+      radiusMeters: 500,
+      scaleRange: [1, 1] as [number, number],
+      patrolRadius: 80,
+      speed: 22,
+      detectionRadius: 120,
+      attackRadius: 20,
+      health: 100,
+      attackDamage: 10,
+      attackCooldownMs: 1_500,
+      activityRadius: 170,
+      modelScale: 6,
+      hitStunMs: 700,
+      strengthMultipliers: { Giant: 1.4 } as Record<string, number>,
+      dayScalePerDay: 0.5,
+      bossHealthMultiplier: 6,
+      bossDamageMultiplier: 1.5,
+    }
+
+    const boss = createBossMonster(config, 'boss-5', 5)
+
+    expect(boss.id).toBe('boss-5')
+    expect(boss.modelName).toBe('Giant')
+    expect(boss.modelIndex).toBe(1)
+    expect(boss.isBoss).toBe(true)
+    // 체력: 100 × 1.4(모델) × 6(보스) × 3(5일차 스케일) = 2520
+    expect(boss.maxHealth).toBe(2520)
+    expect(boss.health).toBe(2520)
+    // 공격력: 10 × 1.4 × 1.5 × 3 = 63
+    expect(boss.attackDamage).toBe(63)
+    // 시각적으로 크고 (modelScale × 1.6), 활동 반경 전체를 배회
+    expect(boss.scale).toBeCloseTo(9.6)
+    expect(boss.activityRadius).toBe(170)
+    expect(Math.hypot(...boss.position)).toBeLessThanOrEqual(400)
+
+    // 보스는 플레이어가 벌목하지 않아도 상시 추격한다
+    const agent = createMonsterAgent(makeResource({ isBoss: true, modelName: 'Giant' }))
+    agent.update(0, 0, makeContext({ playerIsChopping: false }))
+    expect(agent.state).toBe('chase')
+
+    // 일반 몬스터는 여전히 벌목 중일 때만 추격
+    const normal = createMonsterAgent(makeResource())
+    normal.update(0, 0, makeContext({ playerIsChopping: false }))
+    expect(normal.state).toBe('idle')
+  })
+
+  it('createBossMonster falls back to defaults for minimal configs', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const boss = createBossMonster({
+      modelUrls: ['/giant.glb'],
+      seed: 1,
+      count: 1,
+      radiusMeters: 100,
+      scaleRange: [1, 1] as [number, number],
+      patrolRadius: 10,
+      speed: 10,
+      detectionRadius: 20,
+      attackRadius: 5,
+      health: 100,
+      attackDamage: 10,
+      attackCooldownMs: 100,
+      activityRadius: 30,
+      modelScale: 1,
+      hitStunMs: 100,
+    }, 'boss-min', 1)
+
+    // 단일 모델 URL → 인덱스 0 폴백, 미설정 배율은 기본값(6/1.5) 적용
+    expect(boss.modelIndex).toBe(0)
+    expect(boss.modelName).toBe('Giant')
+    expect(boss.health).toBe(600)   // 100 × 6
+    expect(boss.attackDamage).toBe(15) // 10 × 1.5
+    expect(boss.isBoss).toBe(true)
+  })
+
+  it('applies species behavior multipliers to spawned and respawned monsters', () => {
+    const config = {
+      modelUrls: ['/goblin.glb'],
+      seed: 7,
+      count: 4,
+      radiusMeters: 500,
+      scaleRange: [1, 1] as [number, number],
+      patrolRadius: 80,
+      speed: 22,
+      detectionRadius: 120,
+      attackRadius: 20,
+      health: 100,
+      attackDamage: 10,
+      attackCooldownMs: 1_000,
+      activityRadius: 170,
+      modelScale: 6,
+      hitStunMs: 700,
+      speciesBehavior: {
+        Demon: { speedMultiplier: 1.5, attackDamageMultiplier: 2, attackCooldownMultiplier: 0.5, detectionMultiplier: 2 },
+      } as Record<string, import('../../src/game/resources/monsters').SpeciesBehavior>,
+    }
+
+    const resources = createMonsterResources(config)
+    // 단일 URL이므로 전부 Demon(modelNames[0]) — 배율 적용: 속도 하한 22×0.8×1.5, 공격력 20, 쿨다운 500, 탐지 240
+    expect(resources.every(resource => resource.speed >= 22 * 0.8 * 1.5)).toBe(true)
+    expect(resources.every(resource => resource.attackDamage === 20)).toBe(true)
+    expect(resources.every(resource => resource.attackCooldownMs === 500)).toBe(true)
+    expect(resources.every(resource => resource.detectionRadius === 240)).toBe(true)
+
+    // 리스폰에도 동일 적용 (random 0.5 → 속도 계수 1.0)
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const respawned = createRespawnMonster(config, 'monster-respawn-9', 0, 1)
+    expect(respawned.speed).toBe(33) // 22 × 1.0 × 1.5
+    expect(respawned.attackDamage).toBe(20)
+    expect(respawned.attackCooldownMs).toBe(500)
+    expect(respawned.detectionRadius).toBe(240)
+  })
+
+  it('provoked monsters chase and keep attacking without playerIsChopping', () => {
+    // 팩 자극: 자극 만료 전에는 벌목 없이도 추격
+    const provoked = createMonsterAgent(makeResource())
+    provoked.provokedUntil = 5_000
+    provoked.update(0, 1_000, makeContext({ playerIsChopping: false }))
+    expect(provoked.state).toBe('chase')
+
+    // 추격 중 자극 만료 → 흥미 상실
+    provoked.update(0, 6_000, makeContext({ playerIsChopping: false }))
+    expect(provoked.state).toBe('idle')
+
+    // 공격 상태에서도 자극이 유지되면 공격 지속 (쿨다운 도달 시 onAttackPlayer)
+    const onAttackPlayer = vi.fn()
+    const attacking = createMonsterAgent(makeResource())
+    attacking.provokedUntil = 5_000
+    attacking.state = 'attack'
+    attacking.lastAttackTime = 0
+    attacking.update(0, 1_000, makeContext({ playerIsChopping: false, onAttackPlayer }))
+    // 쿨다운 중 → 아직 공격 안 함, 그러나 자극 덕에 공격 상태 유지
+    expect(attacking.state).toBe('attack')
+    expect(onAttackPlayer).not.toHaveBeenCalled()
+    attacking.update(0, 1_600, makeContext({ playerIsChopping: false, onAttackPlayer }))
+    expect(attacking.state).toBe('attack')
+    expect(onAttackPlayer).toHaveBeenCalledTimes(1)
+
+    // hit 상태에서도 자극이 살아 있으면 복귀 시 추격
+    const stunned = createMonsterAgent(makeResource({ health: 100 }))
+    const hitContext = makeContext({
+      playerIsChopping: false,
+      incomingPlayerHits: [{ id: 'monster', damage: 10 }],
+    })
+    stunned.state = 'attack'
+    stunned.update(0, 0, hitContext)
+    expect(stunned.state).toBe('hit')
+    stunned.provokedUntil = 5_000
+    stunned.update(0.71, 800, makeContext({ playerIsChopping: false }))
+    expect(stunned.state).toBe('chase')
   })
 
   it('effectiveDetectionRadius widens at night and gates chase/hit recovery', () => {
@@ -397,7 +555,7 @@ describe('monster agent', () => {
   it('incoming player hit decrements health and enters hit state', () => {
     const context = makeContext({
       playerIsChopping: true,
-      incomingPlayerHit: { id: 'monster', damage: 17 },
+      incomingPlayerHits: [{ id: 'monster', damage: 17 }],
     })
     const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
     const agent = createMonsterAgent(resource)
@@ -414,7 +572,7 @@ describe('monster agent', () => {
   it('ignores incoming hits aimed at another monster', () => {
     const context = makeContext({
       playerIsChopping: true,
-      incomingPlayerHit: { id: 'someone-else', damage: 17 },
+      incomingPlayerHits: [{ id: 'someone-else', damage: 17 }],
     })
     const resource = makeResource({ health: 100, position: [0, 0] })
     const agent = createMonsterAgent(resource)
@@ -429,7 +587,7 @@ describe('monster agent', () => {
   it('exits hit state back to chase after hitStunMs when player is still chopping', () => {
     const hitContext = makeContext({
       playerIsChopping: true,
-      incomingPlayerHit: { id: 'monster', damage: 17 },
+      incomingPlayerHits: [{ id: 'monster', damage: 17 }],
     })
     const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
     const agent = createMonsterAgent(resource)
@@ -447,7 +605,7 @@ describe('monster agent', () => {
   it('transitions directly to death when health reaches zero after a hit', () => {
     const context = makeContext({
       playerIsChopping: true,
-      incomingPlayerHit: { id: 'monster', damage: 17 },
+      incomingPlayerHits: [{ id: 'monster', damage: 17 }],
     })
     const resource = makeResource({ health: 17, attackCooldownMs: 1_000 })
     const agent = createMonsterAgent(resource)
@@ -466,7 +624,7 @@ describe('monster agent', () => {
     // 먼저 hit 상태로 진입 (player chopping)
     const hitContext = makeContext({
       playerIsChopping: true,
-      incomingPlayerHit: { id: 'monster', damage: 17 },
+      incomingPlayerHits: [{ id: 'monster', damage: 17 }],
     })
     const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
     const agent = createMonsterAgent(resource)
@@ -484,7 +642,7 @@ describe('monster agent', () => {
   it('decrements health and enters hit during chase', () => {
     const context = makeContext({
       playerIsChopping: true,
-      incomingPlayerHit: { id: 'monster', damage: 17 },
+      incomingPlayerHits: [{ id: 'monster', damage: 17 }],
     })
     const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0] })
     const agent = createMonsterAgent(resource)
@@ -498,7 +656,7 @@ describe('monster agent', () => {
   it('updateHit timer accumulates across frames until stun expires (timer branch)', () => {
     const hitContext = makeContext({
       playerIsChopping: true,
-      incomingPlayerHit: { id: 'monster', damage: 17 },
+      incomingPlayerHits: [{ id: 'monster', damage: 17 }],
     })
     const resource = makeResource({ health: 100, attackCooldownMs: 1_000, hitStunMs: 700, position: [0, 0] })
     const agent = createMonsterAgent(resource)
