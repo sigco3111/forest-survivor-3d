@@ -164,8 +164,8 @@ describe('monster resources', () => {
       hitStunMs: 700,
       strengthMultipliers: { Giant: 1.4 } as Record<string, number>,
       dayScalePerDay: 0.5,
-      bossHealthMultiplier: 6,
-      bossDamageMultiplier: 1.5,
+      bossHealthMultiplier: 2,
+      bossDamageMultiplier: 0.8,
     }
 
     const boss = createBossMonster(config, 'boss-5', 5)
@@ -174,11 +174,11 @@ describe('monster resources', () => {
     expect(boss.modelName).toBe('Giant')
     expect(boss.modelIndex).toBe(1)
     expect(boss.isBoss).toBe(true)
-    // 체력: 100 × 1.4(모델) × 6(보스) × 3(5일차 스케일) = 2520
-    expect(boss.maxHealth).toBe(2520)
-    expect(boss.health).toBe(2520)
-    // 공격력: 10 × 1.4 × 1.5 × 3 = 63
-    expect(boss.attackDamage).toBe(63)
+    // 체력: 100 × 1.4(모델) × 2(보스) × 3(5일차 스케일) = 840
+    expect(boss.maxHealth).toBe(840)
+    expect(boss.health).toBe(840)
+    // 공격력: 10 × 1.4 × 0.8 × 3 = 33.6 → 34
+    expect(boss.attackDamage).toBe(34)
     // 시각적으로 크고 (modelScale × 1.6), 활동 반경 전체를 배회
     expect(boss.scale).toBeCloseTo(9.6)
     expect(boss.activityRadius).toBe(170)
@@ -237,11 +237,11 @@ describe('monster resources', () => {
       hitStunMs: 100,
     }, 'boss-min', 1)
 
-    // 단일 모델 URL → 인덱스 0 폴백, 미설정 배율은 기본값(6/1.5) 적용
+    // 단일 모델 URL → 인덱스 0 폴백, 미설정 배율은 기본값(2/0.8) 적용
     expect(boss.modelIndex).toBe(0)
     expect(boss.modelName).toBe('Giant')
-    expect(boss.health).toBe(600)   // 100 × 6
-    expect(boss.attackDamage).toBe(15) // 10 × 1.5
+    expect(boss.health).toBe(200)  // 100 × 2
+    expect(boss.attackDamage).toBe(8) // 10 × 0.8
     expect(boss.isBoss).toBe(true)
   })
 

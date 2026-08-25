@@ -159,8 +159,8 @@ export function createBossMonster(config: MonsterConfig, id: string, dayNumber: 
 	const modelIndex = config.modelUrls.length > 1 ? 1 : 0
 	const base = config.strengthMultipliers?.[modelName] ?? 1
 	const dayScale = 1 + (dayNumber - 1) * (config.dayScalePerDay ?? 0)
-	const healthMultiplier = base * (config.bossHealthMultiplier ?? 6)
-	const damageMultiplier = base * (config.bossDamageMultiplier ?? 1.5)
+	const healthMultiplier = base * (config.bossHealthMultiplier ?? 2)
+	const damageMultiplier = base * (config.bossDamageMultiplier ?? 0.8)
 	const maxRadius = config.radiusMeters * 0.8
 	const angle = Math.random() * Math.PI * 2
 	const dist = Math.sqrt(Math.random()) * maxRadius

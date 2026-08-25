@@ -116,6 +116,7 @@
 			<div class="boss-bar__track">
 				<div class="boss-bar__fill" :style="{ width: `${bossBar.percent}%` }"></div>
 			</div>
+			<div class="boss-bar__hp">{{ bossBar.health }} / {{ bossBar.maxHealth }}</div>
 		</div>
 		<div v-if="daySummary.visible" class="day-summary">
 			<div class="day-summary__title">{{ t('hud.summary.title', { day: daySummary.day }) }}</div>
@@ -764,7 +765,7 @@ function processRespawns() {
 
 // ===== 보스: bossIntervalDays마다 스폰, 상시 추격, 전용 HP바 =====
 const activeBossId = ref<string | null>(null)
-const bossBar = ref<{ name: string; distance: number; percent: number } | null>(null)
+const bossBar = ref<{ name: string; distance: number; health: number; maxHealth: number; percent: number } | null>(null)
 
 function spawnBoss(dayNumber: number) {
 	if (!scene) return
@@ -794,6 +795,8 @@ function updateBossBar() {
 	bossBar.value = {
 		name: agent.resource.modelName,
 		distance,
+		health: Math.max(0, agent.resource.health),
+		maxHealth: agent.resource.maxHealth,
 		percent: Math.max(0, Math.round((agent.resource.health / agent.resource.maxHealth) * 100)),
 	}
 }
@@ -2107,6 +2110,15 @@ function disposeScene() {
 	background: linear-gradient(90deg, #ff4444, #ff6bd6);
 	box-shadow: 0 0 14px rgba(255, 107, 214, 0.6);
 	transition: width 0.15s linear;
+}
+
+.boss-bar__hp {
+	margin-top: 3px;
+	font-size: 11px;
+	font-weight: 700;
+	color: #ffdff5;
+	opacity: 0.9;
+	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
 }
 
 .game-controls {

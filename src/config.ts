@@ -159,9 +159,10 @@ export const MONSTER_CONFIG = {
   // 사망 연출 유지 시간 (이후 시체 정리)
   deathAnimMs: 1200,
   // 보스: bossIntervalDays마다 스폰. 체력/공격력 배율은 모델 강도에 추가 곱산.
+  // 20~30초짜리 전투가 되도록 조정 — 너무 높으면 게이지가 움직이지 않는다.
   bossIntervalDays: 5,
-  bossHealthMultiplier: 6,
-  bossDamageMultiplier: 1.5,
+  bossHealthMultiplier: 2,
+  bossDamageMultiplier: 0.8,
   bossRewardWood: 60,
   // 팩 응집: 피격당한 몬스터 주변 같은 종족을 자극해 함께 추격
   packAggroRadius: 100,
