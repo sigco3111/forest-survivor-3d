@@ -6,6 +6,19 @@
 			<div class="start-card">
 				<h1 class="start-card__title">{{ t('start.title') }}</h1>
 				<p class="start-card__subtitle">{{ t('start.subtitle') }}</p>
+				<div class="start-card__meta">
+					<div class="start-card__meta-row">
+						<span>{{ t('meta.level') }}: <b>L{{ metaSummary.metaLevel }}</b></span>
+						<span>{{ t('meta.xp') }}: {{ metaSummary.totalXp }}</span>
+						<span>{{ t('meta.runs') }}: {{ metaSummary.totalRuns }}</span>
+					</div>
+					<div v-if="metaSummary.metaLevel > 0" class="start-card__meta-bonus">
+						{{ t('meta.startBonus') }}:
+						+{{ metaSummary.startBonus.extraHealth }} HP,
+						+{{ metaSummary.startBonus.extraAttack }} atk
+						<span v-if="metaSummary.startBonus.extraWood > 0">, +{{ metaSummary.startBonus.extraWood }} 🌲</span>
+					</div>
+				</div>
 				<div class="start-card__presets">
 					<button v-if="loadedSave" type="button" class="start-preset start-preset--continue" @click="continueSave">
 						<span class="start-preset__name">{{ t('start.continue', { day: loadedSave.day }) }}</span>
@@ -192,6 +205,8 @@
 				<p>{{ t('gameOver.survived', { days: currentDay - 1 }) }}</p>
 				<p>{{ t(deathCause === 'slain' ? 'gameOver.slain' : 'gameOver.exhausted') }}</p>
 				<p v-if="bestRecord" class="game-over-best">{{ t('gameOver.best', { days: bestRecord.days, kills: bestRecord.kills }) }}</p>
+				<p class="game-over-meta">{{ t('meta.xpGained', { xp: metaSummary.lastRunXp }) }}</p>
+				<p v-if="metaSummary.metaLevel > 0" class="game-over-meta">Lv → L{{ metaSummary.metaLevel }}</p>
 				<button class="game-over-btn" @click="restartGame">{{ t('gameOver.restart') }}</button>
 			</div>
 		</div>
@@ -309,6 +324,7 @@ import {
 } from '~/game/time/lighting'
 import { eventsForDay, type ScheduledEvent } from '~/game/events/scheduler'
 import { createMasteryState, recordKill, toApplication, type MasteryState } from '~/game/player/mastery'
+import { applyRunXp, computeRunXp, emptyMetaState, loadMetaState, saveMetaState, startBonusFor, type MetaState, type StartBonus } from '~/game/meta-progression'
 import { loadRunState, saveRunState, clearRunState, type RunSaveState } from '~/game/save'
 
 defineOptions({
@@ -558,6 +574,21 @@ let lastDayEvents: ScheduledEvent[] = []
 let goldenTreeId: string | null = null
 let goldenTreeBonus = 0
 let masteryState: MasteryState | null = null
+let metaState: MetaState = emptyMetaState()
+const metaSummary = ref<{ totalXp: number; metaLevel: number; xpIntoLevel: number; nextLevelXp: number; totalRuns: number; unlockedSpecies: string[]; lastRunXp: number; startBonus: StartBonus }>({
+	totalXp: 0,
+	metaLevel: 0,
+	xpIntoLevel: 0,
+	nextLevelXp: 0,
+	totalRuns: 0,
+	unlockedSpecies: [],
+	lastRunXp: 0,
+	startBonus: { extraHealth: 0, extraAttack: 0, extraWood: 0 },
+})
+let lastRunXpEarned = 0
+let runBuildingsBuilt = 0
+let runGoldenTreesCollected = 0
+let runBossesKilled = 0
 
 // 게임 시계: 배속/일시정지를 지원하기 위해 실시간과 분리된 누적 시간 (ms)
 let gameNow = 0
@@ -593,7 +624,25 @@ onMounted(() => {
 	// 씬은 시작 오버레이의 프리셋/이어하기 선택 후에 만든다 (자동 시작 안 함).
 	bestRecord.value = loadBestRecord(localStorage)
 	loadedSave.value = loadRunState(localStorage)
+	metaState = loadMetaState(localStorage) ?? emptyMetaState()
+	refreshMetaSummary()
 })
+
+function refreshMetaSummary() {
+	const nextLevelXp = metaState.metaLevel === 0
+		? 0
+		: Math.round(200 * Math.pow(1.5, metaState.metaLevel - 1))
+	metaSummary.value = {
+		totalXp: metaState.totalXp,
+		metaLevel: metaState.metaLevel,
+		xpIntoLevel: metaState.xpIntoLevel,
+		nextLevelXp,
+		totalRuns: metaState.totalRuns,
+		unlockedSpecies: [...metaState.unlockedSpecies],
+		lastRunXp: lastRunXpEarned,
+		startBonus: startBonusFor(metaState.metaLevel),
+	}
+}
 
 onUnmounted(() => {
 	disposeScene()
@@ -678,6 +727,19 @@ function createScene() {
 	createEnvObjects(scene)
 	createMonsters(scene)
 	createPlayer(scene, selectedPreset.value ?? 'balanced')
+	// 메타 진행: 이전 런에서 누적된 레벨 → 시작 보너스 주입 (HP/atk/wood)
+	if (playerAgent && !loadedSave.value) {
+		const bonus = startBonusFor(metaState.metaLevel)
+		playerAgent.maxHealth += bonus.extraHealth
+		playerAgent.health += bonus.extraHealth
+		playerAgent.attackDamage += bonus.extraAttack
+		playerAgent.woodCollected += bonus.extraWood
+		woodCount.value = Math.max(0, playerAgent.woodCollected)
+	}
+	lastRunXpEarned = 0
+	runBuildingsBuilt = 0
+	runGoldenTreesCollected = 0
+	runBossesKilled = 0
 	window.addEventListener('resize', handleResize)
 	animationFrame = window.requestAnimationFrame(renderFrame)
 }
@@ -973,6 +1035,7 @@ function settleKill(agent: MonsterAgent) {
 		logEvent(t('hud.log.bossKill', { count: reward }), 'boss')
 		showToast(t('hud.log.bossKill', { count: reward }))
 		activeBossId.value = null
+		runBossesKilled += 1
 	} else {
 		logEvent(t('hud.log.kill', { model: agent.resource.modelName, count: reward }), 'kill')
 	}
@@ -1150,6 +1213,19 @@ function recordRun() {
 		days: Math.max(0, currentDay.value - 1),
 		kills: monsterKills.value,
 	})
+	// 메타 진행: 런 종료 시 통계 → XP → 레벨업 → 영구 저장 + 도감 해금
+	const summary = {
+		days: Math.max(0, currentDay.value - 1),
+		kills: monsterKills.value,
+		bosses: runBossesKilled,
+		buildings: runBuildingsBuilt,
+		goldenTrees: runGoldenTreesCollected,
+	}
+	const unlocked = masteryState ? Array.from(masteryState.speciesCounts.keys()) : []
+	metaState = applyRunXp(metaState, computeRunXp(summary), unlocked)
+	lastRunXpEarned = computeRunXp(summary)
+	saveMetaState(localStorage, metaState)
+	refreshMetaSummary()
 }
 
 // 从场景、动画控制器、Agent 列表中移除死亡怪物并释放资源
@@ -1387,6 +1463,7 @@ function renderFrame() {
 			showRewardToast(bonus)
 			goldenTreeId = null
 			goldenTreeBonus = 0
+			runGoldenTreesCollected += 1
 		}
 		playerAgent.lastCollectedTree = null
 	}
@@ -1819,6 +1896,13 @@ function restartGame() {
 	selectedPreset.value = null
 	runStarted.value = false
 	bestRecord.value = loadBestRecord(localStorage)
+	// 메타 진행은 영구 — 새 런 시작 시 현재 값을 다시 로드해 시작 오버레이에 반영.
+	metaState = loadMetaState(localStorage) ?? emptyMetaState()
+	lastRunXpEarned = 0
+	runBuildingsBuilt = 0
+	runGoldenTreesCollected = 0
+	runBossesKilled = 0
+	refreshMetaSummary()
 }
 
 // ===== 2·3단계: 이벤트 처리 / 자동 건설 / 밤습격 / 자동 저장 / 복원 =====
@@ -1907,6 +1991,7 @@ function tryAutoBuild(dayNumber: number) {
 		if (building.type === 'campfire') {
 			renderCampfire(building)
 			logEvent(t('hud.log.buildCampfire', { count: BUILDING_CONFIG.campfireCostWood }), 'level')
+			runBuildingsBuilt += 1
 		} else if (building.type === 'fence') {
 			renderFence(building)
 		}
@@ -2724,9 +2809,36 @@ function disposeScene() {
 }
 
 .start-card__subtitle {
-	margin: 0 0 24px;
+	margin: 0 0 12px;
 	font-size: 14px;
 	opacity: 0.78;
+}
+
+.start-card__meta {
+	margin-bottom: 18px;
+	padding: 10px 14px;
+	border-radius: 10px;
+	background: rgba(53, 244, 255, 0.08);
+	color: #dffcff;
+	font-size: 12px;
+	line-height: 1.6;
+}
+
+.start-card__meta-row {
+	display: flex;
+	gap: 12px;
+	justify-content: space-between;
+	flex-wrap: wrap;
+}
+
+.start-card__meta-row b {
+	color: #ffc857;
+}
+
+.start-card__meta-bonus {
+	margin-top: 4px;
+	font-size: 11px;
+	opacity: 0.85;
 }
 
 .start-card__presets {
@@ -3007,6 +3119,11 @@ function disposeScene() {
 .game-over-best {
 	color: #ffc857 !important;
 	font-weight: 700;
+}
+
+.game-over-meta {
+	color: #35f4ff !important;
+	font-weight: 600;
 }
 
 @media (max-width: 600px) {

@@ -110,6 +110,13 @@ export const messages = {
 			continue: 'Continue · Day {day}',
 			newGame: 'New run',
 		},
+		meta: {
+			level: 'Meta Level',
+			xp: 'XP',
+			runs: 'Runs',
+			startBonus: 'Run start bonus',
+			xpGained: '+{xp} meta XP',
+		},
 		gameOver: {
 			title: 'Game over',
 			survived: 'You survived {days} days',
@@ -230,6 +237,13 @@ export const messages = {
 			continue: '继续 · 第 {day} 天',
 			newGame: '新的开始',
 		},
+		meta: {
+			level: '元等级',
+			xp: '经验',
+			runs: '局数',
+			startBonus: '本局起始加成',
+			xpGained: '+{xp} 元经验',
+		},
 		gameOver: {
 			title: '游戏结束',
 			survived: '你存活了 {days} 天',
@@ -349,6 +363,13 @@ export const messages = {
 			begin: '생존 시작',
 			continue: '이어하기 · {day}일차',
 			newGame: '새로 시작',
+		},
+		meta: {
+			level: '메타 레벨',
+			xp: 'XP',
+			runs: '런 수',
+			startBonus: '이번 런 시작 보너스',
+			xpGained: '+{xp} 메타 경험치',
 		},
 		gameOver: {
 			title: '게임 오버',
