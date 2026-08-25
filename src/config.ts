@@ -168,13 +168,72 @@ export const MONSTER_CONFIG = {
   // 팩 응집: 피격당한 몬스터 주변 같은 종족을 자극해 함께 추격
   packAggroRadius: 100,
   packAggroDurationMs: 8000,
+  // 종족 특수화 — 소심함(도주) 커브
+  fleeSafeDistanceMultiplier: 1.8, // 도주 종료 거리 = 탐지 반경 × 이 배율
+  cowerDurationMs: 9000,           // 도주 종료 후 이 시간까지 재추격하지 않는다 (겁먹은 상태)
   // 종족별 행동 특화: 같은 스탯이라도 느낌이 다르게 (미등록 종족은 배율 1)
+  // - fleeHealthRatio: 체력이 이 비율 이하로 깎이면 도주한다 (겁 많은 종족)
+  // - ranged: 이 사거리에서 멈춰 투사체를 날린다 (원거리 종족)
   speciesBehavior: {
-    Goblin: { speedMultiplier: 1.25, attackCooldownMultiplier: 0.8 },
+    Goblin: { speedMultiplier: 1.25, attackCooldownMultiplier: 0.8, fleeHealthRatio: 0.35 },
     Skeleton: { speedMultiplier: 0.85, attackDamageMultiplier: 1.5 },
     Zombie: {},
     Yeti: { speedMultiplier: 1.35 },
     Giant: { attackDamageMultiplier: 1.3, attackCooldownMultiplier: 1.3 },
-    Demon: { detectionMultiplier: 1.3 },
+    Demon: { detectionMultiplier: 1.3, ranged: { range: 70, projectileSpeed: 110 } },
   } as Record<string, import('~/game/resources/monsters').SpeciesBehavior>,
+};
+
+// ===== 2·3단계 고도화: 일일 이벤트 / 성향 프리셋 / 카메라 연출 / 건축 =====
+
+// 일일 이벤트 스케줄러: day별 이벤트를 seed 기반으로 결정론 산출한다.
+// 밤습격 = raidFirstDay 이상 & day % raidIntervalDays === 0 인 날 해질녘에 몬스터 무리가 습격한다.
+export const EVENT_CONFIG = {
+  seed: 9900,
+  raidFirstDay: 5,
+  raidIntervalDays: 5,
+  raidBaseCount: 3,             // 첫 습격 규모
+  raidCountGrowthPerDay: 0.4,   // 경과 일차당 습격 규모 증가
+  goldenTreeChance: 0.4,        // 하루당 황금 나무 등장 확률 (seeded)
+  goldenTreeWoodBonus: 12,      // 황금 나무 벌목 보너스 나무
+};
+
+// 성향 프리셋: 레벨업 스탯 분배 가중치. 플레이어는 시작 시 3택하고 이후 자동 성장한다.
+export const PRESET_CONFIG = {
+  aggressive: { attackWeight: 2, healthWeight: 0.6, speedWeight: 1.4, scanWeight: 2, regenBonus: 0 },
+  balanced: { attackWeight: 1, healthWeight: 1, speedWeight: 1, scanWeight: 1, regenBonus: 0 },
+  survivor: { attackWeight: 0.6, healthWeight: 1.8, speedWeight: 0.7, scanWeight: 0.5, regenBonus: 2 },
+} as Record<
+  import('~/game/player/agent').PlayerPresetId,
+  import('~/game/player/agent').PresetWeights
+>;
+
+// 카메라 연출 감독: 교전 줌인/보스 인트로 셰이크/위기 비네트 강도를 순수 수학으로 산출한다.
+export const CAMERA_DIRECTOR_CONFIG = {
+  followLerpPerSecond: 6,        // 줌 배율 보간 속도 (1/초)
+  combatZoomScale: 0.75,         // 교전 중 카메라 거리 배율 (줌인)
+  bossZoomScale: 0.85,           // 보스 교전 중 거리 배율
+  crisisVignetteRatio: 0.4,      // HP 비율이 이하로 내려가면 비네트 시작
+  maxVignetteIntensity: 0.85,    // 비네트 최대 불투명도
+  shakeDecayPerSecond: 1.8,      // 셰이크 강도 초당 감쇠
+  bossIntroShakeIntensity: 1,    // 보스 등장 셰이크 초기 강도
+  hitShakeIntensity: 0.35,       // 피격 셰이크 초기 강도
+  hitShakeDurationMs: 350,       // 피격 셰이크 지속 시간
+  focusBlendRatio: 0.35,         // 포커스 = 플레이어↔위협 중점 블렌드 비율
+};
+
+// 건축: 목재를 소비해 모닥불(야간 탐지 감쇠)과 울타리(몬스터 우회 유도)를 자동 건설한다.
+// 배치는 전부 결정론적 — 모닥불 = 플레이어 위치, 울타리 = 모닥불 중심 균등 원형 배치 (0번 세그먼트는 출입문).
+export const BUILDING_CONFIG = {
+  campfireMinDay: 2,             // 이 일차부터 건설 시도
+  campfireCostWood: 22,
+  campfireMaxCount: 3,
+  campfireLightRadius: 140,      // 야간 탐지 감쇠가 적용되는 빛 반경
+  campfireDetectionFactor: 0.45, // 빛 반경 안 플레이어의 실효 탐지 배율 (곱산)
+  detectionFactorFloor: 0.25,    // 여러 모닥불 중첩 시 최저 배율
+  buildCooldownDays: 1,          // 건설 시도 간격 (일차)
+  fenceSegments: 10,             // 모닥불당 울타리 세그먼트 수 (0번 = 출입문)
+  fenceCostPerSegment: 2,
+  fenceRingRadius: 42,           // 울타리 링 반경
+  fenceBlockRadius: 9,           // 세그먼트 통과 차단 반경
 };

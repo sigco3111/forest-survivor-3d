@@ -7,6 +7,34 @@ import {
 
 export type PlayerAgentState = 'exploring' | 'approaching' | 'chopping' | 'fleeing' | 'attacking' | 'hunting'
 
+/** 성향 프리셋 ID: 시작 시 플레이어가 3택하고 런 내내 유지된다 */
+export type PlayerPresetId = 'aggressive' | 'balanced' | 'survivor'
+
+/**
+ * 레벨업 스탯 분배 가중치 (성향 프리셋).
+ * 각 값은 대응하는 level*Bonus 설정치에 곱해지고, regenBonus는 비전투 회복량에 더해진다.
+ * 미지정 시 균형(모두 1, 보너스 0)으로 동작한다.
+ */
+export type PresetWeights = {
+	attackWeight: number
+	healthWeight: number
+	speedWeight: number
+	scanWeight: number
+	regenBonus: number
+}
+
+const DEFAULT_PRESET_WEIGHTS: PresetWeights = {
+	attackWeight: 1,
+	healthWeight: 1,
+	speedWeight: 1,
+	scanWeight: 1,
+	regenBonus: 0,
+}
+
+function weightsOf(config: Pick<PlayerAgentConfig, 'presetWeights'>): PresetWeights {
+	return config.presetWeights ?? DEFAULT_PRESET_WEIGHTS
+}
+
 export type PlayerThreatSource = {
 	id?: string
 	position: PlanePoint
@@ -79,6 +107,7 @@ export type PlayerAgentConfig = {
 	monsterAttackPowerWeight: number  // 몬스터 공격력 → 위협 전투력 가중치
 	huntAggroRangeMultiplier: number  // 선제공격 스캔 범위 배율 (attackRangeMeters × 배율)
 	huntGiveUpRangeMultiplier: number // 추격 포기 범위 배율 (attackRangeMeters × 배율)
+	presetWeights?: PresetWeights     // 성향 프리셋 가중치 (미지정 = 균형)
 	worldRadius: number           // 世界半径
 	collisionCheck: (position: PlanePoint) => boolean
 	treeResources: () => TreeResource[]
@@ -114,6 +143,8 @@ export type PlayerAgent = {
 	lastCollectedTree: TreeResource | null
 	attackTarget: PlayerThreatSource | null
 	playerAlive: boolean
+	/** Current movement speed; mirrors config.speed for serialization (save/restore). */
+	speed: number
 	/** 비전투 회복 타이머 (ms). 전투/추격/도망 진입 시 리셋. */
 	regenTimer: number
 	avoidedAreas: AvoidedArea[]
@@ -181,6 +212,7 @@ export function createPlayerAgent(
 		furyActiveUntil: 0,
 		animation: 'walk',
 		lastCollectedTree: null,
+		speed: config.speed,
 		attackTarget: null,
 		playerAlive: true,
 		regenTimer: 0,
@@ -197,15 +229,20 @@ export function createPlayerAgent(
 		},
 
 		addExperience(amount: number) {
+			const weights = weightsOf(config)
 			this.exp += amount
 			let threshold = expForLevel(this.level, config)
 			while (this.exp >= threshold) {
 				this.exp -= threshold
 				this.level += 1
-				this.maxHealth += config.levelHealthBonus
-				this.health = Math.min(this.maxHealth, this.health + config.levelHealthBonus)
-				this.attackDamage += config.levelAttackBonus
-				config.speed += config.levelSpeedBonus
+				// 성향 프리셋 가중치가 적용된 레벨업 보너스 (맹공격 = 공격 위주, 생존가 = 체력/회복 위주)
+				const healthBonus = Math.round(config.levelHealthBonus * weights.healthWeight)
+				this.maxHealth += healthBonus
+				this.health = Math.min(this.maxHealth, this.health + healthBonus)
+				this.attackDamage += Math.round(config.levelAttackBonus * weights.attackWeight)
+				const speedDelta = config.levelSpeedBonus * weights.speedWeight
+				config.speed += speedDelta
+				this.speed += speedDelta
 				threshold = expForLevel(this.level, config)
 			}
 		},
@@ -237,11 +274,13 @@ export function createPlayerAgent(
 			while (this.upgradeWeapon()) { /* 여러 단계 연속 강화 */ }
 
 			// 비전투 중(탐색/이동/벌목)에는 일정 간격으로 체력 회복. 전투/추격/도망 중에는 정지.
+			// 생존가 프리셋은 regenBonus만큼 틱당 회복량이 늘어난다.
 			if (this.state === 'exploring' || this.state === 'approaching' || this.state === 'chopping') {
 				this.regenTimer += delta * 1000
 				if (this.regenTimer >= config.regenIntervalMs) {
 					this.regenTimer -= config.regenIntervalMs
-					this.health = Math.min(this.maxHealth, this.health + config.regenHealthAmount)
+					const regenAmount = config.regenHealthAmount + weightsOf(config).regenBonus
+					this.health = Math.min(this.maxHealth, this.health + regenAmount)
 				}
 			} else {
 				this.regenTimer = 0
@@ -834,9 +873,10 @@ export function isPlayerCritical(
 
 // ===== 사냥감 탐색: 활동 반경 안에서 "나보다 약한" 가장 가까운 적 =====
 export function findPreyTarget(agent: PlayerAgent, config: PlayerAgentConfig): PlayerThreatSource | null {
-	// 스캔 범위는 레벨과 함께 넓어진다 (성장할수록 더 멀리서 전투를 시작)
+	// 스캔 범위는 레벨과 함께 넓어진다 (성장할수록 더 멀리서 전투를 시작).
+	// 맹공격 프리셋은 scanWeight로 성장 폭을 넓힌다.
 	const scanRange = config.attackRangeMeters * config.huntAggroRangeMultiplier
-		+ (agent.level - 1) * config.huntScanRangePerLevel
+		+ (agent.level - 1) * config.huntScanRangePerLevel * weightsOf(config).scanWeight
 	let nearest: PlayerThreatSource | null = null
 	let nearestDistance = Number.POSITIVE_INFINITY
 	for (const threat of config.threatSources()) {

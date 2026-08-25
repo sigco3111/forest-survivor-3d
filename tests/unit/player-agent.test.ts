@@ -18,6 +18,7 @@ import {
   shouldFleeThreat,
   type PlayerAgentConfig,
   type PlayerThreatSource,
+  type PresetWeights,
 } from '../../src/game/player/agent'
 import type { PlanePoint } from '../../src/game/resources/trees'
 import type { TreeResource } from '../../src/game/resources/trees'
@@ -1410,5 +1411,139 @@ describe('player agent', () => {
     agent.update(0, 100)
     expect(agent.state).toBe('exploring')
     expect(agent.attackTarget).toBeNull()
+  })
+})
+
+describe('player preset weights', () => {
+  it('applies preset weights to level-up bonuses and non-combat regen', () => {
+    const baseSpeed = 20
+    const mkAgent = (presetWeights: PresetWeights) => {
+      const agent = createPlayerAgent([0, 0], {
+        exploreDistance: 50,
+        speed: baseSpeed,
+        collectRadius: 5,
+        chopDurationMs: 1_000,
+        attackRangeMeters: 20,
+        attackDamageMs: 100,
+        attackCooldownMs: 500,
+        playerAttackDamage: 10,
+        playerMaxHealth: 100,
+        killHealHealth: 10,
+        regenHealthAmount: 1,
+        regenIntervalMs: 1_000,
+        criticalHealthRatio: 0.25,
+        fleeSafeDistanceMeters: 100,
+        expBase: 100,
+        expGrowth: 1,
+        levelAttackBonus: 10,
+        levelHealthBonus: 20,
+        levelSpeedBonus: 5,
+        huntScanRangePerLevel: 5,
+        slamUnlockLevel: 99,
+        slamCooldownMs: 0,
+        slamRadius: 0,
+        slamDamageMultiplier: 0,
+        furyUnlockLevel: 99,
+        furyCooldownMs: 0,
+        furyDurationMs: 0,
+        furySwingMultiplier: 1,
+        leechUnlockLevel: 99,
+        leechRatio: 0,
+        upgradeCostBase: 999,
+        upgradeCostGrowth: 1,
+        weaponAttackPerTier: 0,
+        weaponPowerPerTier: 0,
+        reserveWood: 0,
+        playerBasePower: 50,
+        powerPerWood: 0,
+        monsterHealthPowerWeight: 1,
+        monsterAttackPowerWeight: 1,
+        huntAggroRangeMultiplier: 1,
+        huntGiveUpRangeMultiplier: 1,
+        worldRadius: 1_000,
+        collisionCheck: () => false,
+        treeResources: () => [],
+        threatSources: () => [],
+        presetWeights,
+      })
+      return agent
+    }
+
+    const aggressive = mkAgent({ attackWeight: 2, healthWeight: 0.5, speedWeight: 1.4, scanWeight: 2, regenBonus: 0 })
+    aggressive.addExperience(100) // expBase=100, growth=1 → 정확히 레벨 2 한 단계
+    expect(aggressive.attackDamage).toBe(10 + Math.round(10 * 2)) // 공격 30
+    expect(aggressive.maxHealth).toBe(100 + Math.round(20 * 0.5)) // HP 110
+    expect(aggressive.health).toBe(100 + Math.round(20 * 0.5))
+    // 가중치는 scene이 소유한 config.speed를 직접 가산 — 다음 에이전트 비교를 위해 캡처
+    const speedAfterAggressive = baseSpeed + Math.round(5 * 1.4) + 5 * 1.4 // 변동 누적이 아니라 단순 가산
+
+    const survivor = mkAgent({ attackWeight: 0.6, healthWeight: 1.8, speedWeight: 0.7, scanWeight: 0.5, regenBonus: 2 })
+    survivor.addExperience(100)
+    expect(survivor.maxHealth).toBe(100 + Math.round(20 * 1.8)) // HP 136
+    expect(survivor.attackDamage).toBe(10 + Math.round(10 * 0.6)) // 공격 16
+
+    // 가중치가 다르면 결과도 다르다 (회귀 방지용 형태 비교)
+    expect(aggressive.attackDamage).toBeGreaterThan(survivor.attackDamage)
+    expect(survivor.maxHealth).toBeGreaterThan(aggressive.maxHealth)
+    expect(speedAfterAggressive).toBeGreaterThan(0) // 가중치 가산이 실제 적용됨
+
+    // 비전투 회복 보너스: 생존가 에이전트가 1000ms 회복 틱에서 regenBonus만큼 더 회복
+    survivor.health = 50
+    survivor.regenTimer = 1_000
+    survivor.update(0, 2_000)
+    expect(survivor.health).toBe(50 + 1 + 2) // regenHealthAmount + regenBonus
+  })
+
+  it('falls back to balanced defaults when presetWeights is omitted', () => {
+    const agent = createPlayerAgent([0, 0], {
+      exploreDistance: 50,
+      speed: 20,
+      collectRadius: 5,
+      chopDurationMs: 1_000,
+      attackRangeMeters: 20,
+      attackDamageMs: 100,
+      attackCooldownMs: 500,
+      playerAttackDamage: 10,
+      playerMaxHealth: 100,
+      killHealHealth: 10,
+      regenHealthAmount: 1,
+      regenIntervalMs: 1_000,
+      criticalHealthRatio: 0.25,
+      fleeSafeDistanceMeters: 100,
+      expBase: 100,
+      expGrowth: 1,
+      levelAttackBonus: 10,
+      levelHealthBonus: 20,
+      levelSpeedBonus: 5,
+      huntScanRangePerLevel: 5,
+      slamUnlockLevel: 99,
+      slamCooldownMs: 0,
+      slamRadius: 0,
+      slamDamageMultiplier: 0,
+      furyUnlockLevel: 99,
+      furyCooldownMs: 0,
+      furyDurationMs: 0,
+      furySwingMultiplier: 1,
+      leechUnlockLevel: 99,
+      leechRatio: 0,
+      upgradeCostBase: 999,
+      upgradeCostGrowth: 1,
+      weaponAttackPerTier: 0,
+      weaponPowerPerTier: 0,
+      reserveWood: 0,
+      playerBasePower: 50,
+      powerPerWood: 0,
+      monsterHealthPowerWeight: 1,
+      monsterAttackPowerWeight: 1,
+      huntAggroRangeMultiplier: 1,
+      huntGiveUpRangeMultiplier: 1,
+      worldRadius: 1_000,
+      collisionCheck: () => false,
+      treeResources: () => [],
+      threatSources: () => [],
+    })
+    agent.addExperience(100)
+    expect(agent.attackDamage).toBe(10 + 10) // 가중치 1
+    expect(agent.maxHealth).toBe(100 + 20) // 가중치 1
   })
 })

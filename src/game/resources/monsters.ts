@@ -1,4 +1,4 @@
-import { MONSTER_GUARDIAN_CONFIG } from '../../config'
+import { MONSTER_CONFIG, MONSTER_GUARDIAN_CONFIG } from '../../config'
 import type { PlanePoint } from '../resources/trees'
 
 export type MonsterResource = {
@@ -20,17 +20,25 @@ export type MonsterResource = {
 	hitStunMs: number
 	/** 보스: 벌목과 무관하게 상시 추격하고 전용 보상을 준다 */
 	isBoss: boolean
+	/** 원거리 종족: 이 사거리에서 멈춰 투사체를 날린다 (미지정 = 근접 전용) */
+	rangedRange?: number
+	/** 도주 종족: 체력 비율이 이 값 이하로 내려가면 도주한다 (겁 많은 종족) */
+	fleeHealthRatio?: number
 }
 
-/** 종족별 행동 특화 배율 (기본 1) */
+/** 종족별 행동 특화 배율 + 특수 능력 (기본 배율 1, 특수 능력 없음) */
 export type SpeciesBehavior = {
 	speedMultiplier?: number
 	attackDamageMultiplier?: number
 	attackCooldownMultiplier?: number
 	detectionMultiplier?: number
+	/** 체력이 이 비율 이하로 깎이면 도주한다 (겁 많은 종족) */
+	fleeHealthRatio?: number
+	/** 원거리 공격: 이 사거리에서 멈춰 투사체를 날린다 */
+	ranged?: { range: number; projectileSpeed: number }
 }
 
-export type MonsterAgentState = 'idle' | 'patrol' | 'tendPlants' | 'chase' | 'attack' | 'hit' | 'death'
+export type MonsterAgentState = 'idle' | 'patrol' | 'tendPlants' | 'chase' | 'attack' | 'hit' | 'flee' | 'death'
 
 export type MonsterUpdateContext = {
 	playerPosition: PlanePoint
@@ -39,12 +47,18 @@ export type MonsterUpdateContext = {
 	playerIsFleeing: boolean
 	/** 밤 여부. 밤에는 경계(탐지) 범위가 nightDetectionMultiplier배로 확대된다. */
 	isNight?: boolean
+	/** 모닥불 등으로 감쇠된 실효 탐지 배율 (미지정 = 1). 실탐지 반경에 곱해진다. */
+	detectionMultiplier?: number
 	/**
 	 * 플레이어의 스윙(및 광역 스킬)이 이 프레임에 겨냥한 몬스터 목록. 유일한 플레이어 공격 경로다.
 	 * 스윙 쿨다운(플레이어 에이전트)이 공격 빈도를 제한하므로 몬스터 쿨다운과 경쟁하지 않는다.
 	 */
 	incomingPlayerHits?: { id: string; damage: number }[]
 	onAttackPlayer: () => void
+	/** 울타리 같은 장애물 판정. 제공되면 이동 시 우회를 시도하고 완전히 막히면 제자리에 머문다. */
+	obstacleCheck?: (position: PlanePoint) => boolean
+	/** 원거리 종족의 투사체 발사 (근접 사거리 밖에서 쿨다운마다 호출) */
+	onRangedAttack?: (from: PlanePoint, targetPosition: PlanePoint, damage: number) => void
 }
 
 export type MonsterAgent = {
@@ -59,6 +73,8 @@ export type MonsterAgent = {
 	hitTimer: number
 	/** 팩 응집: 이 시각까지 플레이어를 추격한다 (동족 피격 등으로 자극받음) */
 	provokedUntil: number
+	/** 겁먹은 상태: 도주 종료 후 이 시각까지 재추격하지 않는다 */
+	coweredUntil: number
 	tendTarget: PlanePoint | null
 	tendTimer: number
 	plantCallback: ((position: PlanePoint) => void) | null
@@ -139,13 +155,15 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 			detectionRadius: Math.round(config.detectionRadius * (behavior.detectionMultiplier ?? 1)),
 			health: Math.round(config.health * strengthMultiplier),
 			maxHealth: Math.round(config.health * strengthMultiplier),
-			attackDamage: Math.round(config.attackDamage * strengthMultiplier * (behavior.attackDamageMultiplier ?? 1)),
-			attackCooldownMs: Math.round(config.attackCooldownMs * (behavior.attackCooldownMultiplier ?? 1)),
-			activityRadius: config.activityRadius * (0.85 + rand() * 0.3),
-			hitStunMs: config.hitStunMs,
-			isBoss: false,
-		})
-	}
+		attackDamage: Math.round(config.attackDamage * strengthMultiplier * (behavior.attackDamageMultiplier ?? 1)),
+		attackCooldownMs: Math.round(config.attackCooldownMs * (behavior.attackCooldownMultiplier ?? 1)),
+		activityRadius: config.activityRadius * (0.85 + rand() * 0.3),
+		hitStunMs: config.hitStunMs,
+		isBoss: false,
+		rangedRange: behavior.ranged?.range,
+		fleeHealthRatio: behavior.fleeHealthRatio,
+	})
+}
 
 	return monsters
 }
@@ -224,6 +242,8 @@ export function createRespawnMonster(
 		activityRadius: config.activityRadius * (0.85 + Math.random() * 0.3),
 		hitStunMs: config.hitStunMs,
 		isBoss: false,
+		rangedRange: behavior.ranged?.range,
+		fleeHealthRatio: behavior.fleeHealthRatio,
 	}
 }
 
@@ -242,6 +262,7 @@ export function createMonsterAgent(
 		stateTimer: 0,
 		hitTimer: 0,
 		provokedUntil: 0,
+		coweredUntil: 0,
 		tendTarget: null,
 		tendTimer: 0,
 		plantCallback: plantCallback ?? null,
@@ -255,13 +276,19 @@ export function createMonsterAgent(
 				return
 			}
 
-			// 플레이어의 스윙 처리: 피해 적용 → 사망 또는 경직(hit)
+			// 플레이어의 스윙 처리: 피해 적용 → 사망 / 겁에 질린 도주 / 경직(hit)
 			const incoming = context.incomingPlayerHits?.find(hit => hit.id === this.resource.id)
 			if (incoming && incoming.damage > 0) {
 				this.resource.health -= incoming.damage
 				if (this.resource.health <= 0) {
 					this.state = 'death'
 					this.animation = 'death'
+				} else if (
+					this.resource.fleeHealthRatio !== undefined
+					&& this.resource.health <= this.resource.maxHealth * this.resource.fleeHealthRatio
+				) {
+					// 도주 종족: 체력이 임계 비율 아래로 떨어지면 경직 대신 도주한다
+					startFleeingFromPlayer(this, context)
 				} else {
 					this.state = 'hit'
 					this.animation = 'hit'
@@ -288,7 +315,7 @@ export function createMonsterAgent(
 					updatePatrol(this, delta, distToPlayer, playerDistanceFromHome, context, now)
 					break
 				case 'tendPlants':
-					updateTendPlants(this, delta, now)
+					updateTendPlants(this, delta, now, context)
 					break
 				case 'chase':
 					updateChase(this, delta, now, distToPlayer, context)
@@ -298,6 +325,9 @@ export function createMonsterAgent(
 					break
 				case 'hit':
 					updateHit(this, delta, now, distToPlayer, playerDistanceFromHome, context)
+					break
+				case 'flee':
+					updateFlee(this, delta, now, distToPlayer, context)
 					break
 			}
 		},
@@ -352,7 +382,7 @@ function updatePatrol(
 		return
 	}
 
-	moveToward(agent, delta)
+	moveToward(agent, delta, context.obstacleCheck)
 
 	if (distanceTo(agent.position, agent.target) < 3) {
 		agent.state = 'idle'
@@ -362,7 +392,7 @@ function updatePatrol(
 }
 
 // ===== tendPlants：种植植物 =====
-function updateTendPlants(agent: MonsterAgent, delta: number, _now: number) {
+function updateTendPlants(agent: MonsterAgent, delta: number, _now: number, context: MonsterUpdateContext) {
 	if (!agent.tendTarget) {
 		agent.state = 'idle'
 		agent.animation = 'idle'
@@ -374,7 +404,7 @@ function updateTendPlants(agent: MonsterAgent, delta: number, _now: number) {
 	const distToTarget = distanceTo(agent.position, agent.tendTarget)
 	if (distToTarget > 3) {
 		agent.target = [...agent.tendTarget]
-		moveToward(agent, delta)
+		moveToward(agent, delta, context.obstacleCheck)
 		agent.bearing = Math.atan2(
 			agent.tendTarget[0] - agent.position[0],
 			agent.tendTarget[1] - agent.position[1],
@@ -436,10 +466,12 @@ function updateChase(
 	}
 
 	agent.target = [...context.playerPosition]
-	moveToward(agent, delta)
+	moveToward(agent, delta, context.obstacleCheck)
 	agent.bearing = faceTarget(agent, context.playerPosition)
 
-	if (distToPlayer < 20) {
+	// 원거리 종족은 사거리에 들어오면 멈춰서 공격한다 (근접 종족는 기존대로 근접 거리)
+	const engageRange = agent.resource.rangedRange ?? MELEE_ENGAGE_RANGE
+	if (distToPlayer < engageRange) {
 		agent.state = 'attack'
 		agent.animation = 'attack'
 		agent.lastAttackTime = now
@@ -468,8 +500,11 @@ function updateAttack(
 		return
 	}
 
+	// 원거리 종족은 자기 사거리를 유지하고, 근접 종족는 기존대로 30까지 버틴다
+	const maxEngageDistance = agent.resource.rangedRange ?? MELEE_GIVE_UP_RANGE
+
 	// 玩家超出攻击范围 → 继续追击 (보스는 예외 — 활동 반경 밖에서도 계속 쫓는다)
-	if (distToPlayer > 30) {
+	if (distToPlayer > maxEngageDistance) {
 		if (
 			!agent.resource.isBoss
 			&& (
@@ -488,9 +523,13 @@ function updateAttack(
 		return
 	}
 
-	// 攻击冷却到期 → 命中
+	// 攻击冷却到期 → 命中. 근접 사거리면 밀격, 그 밖이고 원거리 종족면 투사체를 날린다.
 	if (now - agent.lastAttackTime >= agent.resource.attackCooldownMs) {
-		context.onAttackPlayer()
+		if (agent.resource.rangedRange !== undefined && distToPlayer > MELEE_ENGAGE_RANGE) {
+			context.onRangedAttack?.([...agent.position], [...context.playerPosition], agent.resource.attackDamage)
+		} else {
+			context.onAttackPlayer()
+		}
 		agent.lastAttackTime = now
 	}
 }
@@ -533,12 +572,56 @@ function updateHit(
 	}
 }
 
+// ===== flee：겁에 질려 플레이어에게서 도망친다 (도주 종족 전용 상태) =====
+function startFleeingFromPlayer(agent: MonsterAgent, context: MonsterUpdateContext) {
+	agent.state = 'flee'
+	agent.animation = 'run'
+	agent.target = awayTargetFromPlayer(agent, context.playerPosition)
+}
+
+/** 플레이어 반대편으로 patrolRadius만큼 떨어진 도주 지점 */
+function awayTargetFromPlayer(agent: MonsterAgent, from: PlanePoint): PlanePoint {
+	const dx = agent.position[0] - from[0]
+	const dz = agent.position[1] - from[1]
+	const distance = Math.max(Math.hypot(dx, dz), 1)
+	const step = agent.resource.patrolRadius
+	return [
+		agent.position[0] + (dx / distance) * step,
+		agent.position[1] + (dz / distance) * step,
+	]
+}
+
+function updateFlee(
+	agent: MonsterAgent,
+	delta: number,
+	now: number,
+	distToPlayer: number,
+	context: MonsterUpdateContext,
+) {
+	// 매 프레임 도주 방향을 갱신한다 (플레이어가 쫓아와도 계속 멀어진다)
+	agent.target = awayTargetFromPlayer(agent, context.playerPosition)
+	moveToward(agent, delta, context.obstacleCheck)
+
+	// 안전 거리를 확보하면 도주를 끝내고 잠시 숨을 고른다 (coweredUntil 동안 자극받아도 재추격 불가)
+	if (distToPlayer >= agent.resource.detectionRadius * MONSTER_CONFIG.fleeSafeDistanceMultiplier) {
+		agent.state = 'idle'
+		agent.animation = 'idle'
+		agent.stateTimer = 0
+		agent.coweredUntil = now + MONSTER_CONFIG.cowerDurationMs
+	}
+}
+
 // ===== 辅助函数 =====
 
-/** 밤에는 경계 범위가 확대된 실효 탐지 반경 */
-export function effectiveDetectionRadius(context: Pick<MonsterUpdateContext, 'isNight'>): number {
-	const multiplier = context.isNight === true ? MONSTER_GUARDIAN_CONFIG.nightDetectionMultiplier : 1
-	return MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius * multiplier
+/** 근접 종족의 교전 진입/이탈 거리 (기존 하드코딩 20/30을 상수로 추출) */
+const MELEE_ENGAGE_RANGE = 20
+const MELEE_GIVE_UP_RANGE = 30
+
+/** 밤에는 경계 범위가 확대되고, 모닥불 등 탐지 감쇠 배율이 곱해진 실효 탐지 반경 */
+export function effectiveDetectionRadius(context: Pick<MonsterUpdateContext, 'isNight' | 'detectionMultiplier'>): number {
+	const nightMultiplier = context.isNight === true ? MONSTER_GUARDIAN_CONFIG.nightDetectionMultiplier : 1
+	const dampening = context.detectionMultiplier ?? 1
+	return MONSTER_GUARDIAN_CONFIG.guardianDetectionRadius * nightMultiplier * dampening
 }
 
 function canChasePlayer(
@@ -551,13 +634,27 @@ function canChasePlayer(
 	if (!context.playerAlive) return false
 	// 보스는 언제 어디서든 플레이어를 추격한다 (탐지 반경/활동 반경 무시)
 	if (agent.resource.isBoss) return true
+	// 겁먹은 상태에서는 자극받아도 재추격하지 않는다 (도주 종족 전용 게이트)
+	if (now < agent.coweredUntil) return false
 	const engaged = context.playerIsChopping || now < agent.provokedUntil
 	return engaged
 		&& distToPlayer < effectiveDetectionRadius(context)
 		&& playerDistanceFromHome <= agent.resource.activityRadius
 }
 
-function moveToward(agent: MonsterAgent, delta: number) {
+/** 이동 스텝 계산에 쓰는 우회 각도 팬. 울타리 같은 장애물에 막힌 좁은 길을 빠져나온다. */
+const MONSTER_DETOUR_OFFSETS = [
+	0,
+	Math.PI / 6, -Math.PI / 6,
+	Math.PI / 3, -Math.PI / 3,
+	Math.PI / 2, -Math.PI / 2,
+]
+
+/**
+ * 목표를 향해 이동한다. obstacleCheck가 주어지면 직진이 막힐 때 각도를 벌려 우회를 시도하고,
+ * 그마저 전부 막히면 제자리에 머문다(장애물 = 몬스터를 되돌리지 않고 지연시킨다).
+ */
+function moveToward(agent: MonsterAgent, delta: number, obstacleCheck?: (position: PlanePoint) => boolean) {
 	const dx = agent.target[0] - agent.position[0]
 	const dz = agent.target[1] - agent.position[1]
 	const distance = Math.hypot(dx, dz)
@@ -565,13 +662,26 @@ function moveToward(agent: MonsterAgent, delta: number) {
 
 	const speed = agent.resource.speed * delta
 	const travelDistance = Math.min(distance, speed)
-	agent.position = [
-		agent.position[0] + (dx / distance) * travelDistance,
-		agent.position[1] + (dz / distance) * travelDistance,
-	]
-	if (agent.state !== 'chase') {
-		agent.bearing = Math.atan2(dx, dz)
+	const baseAngle = Math.atan2(dx, dz)
+
+	for (const offset of MONSTER_DETOUR_OFFSETS) {
+		const angle = baseAngle + offset
+		// 직진(offset 0)은 기존과 동일한 정규화 벡터를 써서 부동소수점 오차를 피한다
+		const dirX = offset === 0 ? dx / distance : Math.sin(angle)
+		const dirZ = offset === 0 ? dz / distance : Math.cos(angle)
+		const candidate: PlanePoint = [
+			agent.position[0] + dirX * travelDistance,
+			agent.position[1] + dirZ * travelDistance,
+		]
+		if (!obstacleCheck || !obstacleCheck(candidate)) {
+			agent.position = candidate
+			if (agent.state !== 'chase') {
+				agent.bearing = Math.atan2(dx, dz)
+			}
+			return
+		}
 	}
+	// 모든 방향이 막힘: 제자리에서 다음 프레임을 기다린다
 }
 
 function faceTarget(agent: MonsterAgent, target: PlanePoint): number {

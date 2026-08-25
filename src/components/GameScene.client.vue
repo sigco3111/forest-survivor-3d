@@ -1,6 +1,30 @@
 <template>
 	<div class="game-stage">
 		<div ref="sceneContainer" class="scene-container"></div>
+		<div class="vignette" :style="{ opacity: vignetteIntensity }" aria-hidden="true"></div>
+		<div v-if="presets" class="start-overlay" role="dialog" :aria-label="t('start.title')">
+			<div class="start-card">
+				<h1 class="start-card__title">{{ t('start.title') }}</h1>
+				<p class="start-card__subtitle">{{ t('start.subtitle') }}</p>
+				<div class="start-card__presets">
+					<button v-if="loadedSave" type="button" class="start-preset start-preset--continue" @click="continueSave">
+						<span class="start-preset__name">{{ t('start.continue', { day: loadedSave.day }) }}</span>
+					</button>
+					<button type="button" class="start-preset" @click="pickPreset('aggressive')">
+						<span class="start-preset__name">{{ t('start.aggressive') }}</span>
+						<span class="start-preset__desc">{{ t('start.aggressiveDesc') }}</span>
+					</button>
+					<button type="button" class="start-preset" @click="pickPreset('balanced')">
+						<span class="start-preset__name">{{ t('start.balanced') }}</span>
+						<span class="start-preset__desc">{{ t('start.balancedDesc') }}</span>
+					</button>
+					<button type="button" class="start-preset" @click="pickPreset('survivor')">
+						<span class="start-preset__name">{{ t('start.survivor') }}</span>
+						<span class="start-preset__desc">{{ t('start.survivorDesc') }}</span>
+					</button>
+				</div>
+			</div>
+		</div>
 		<div class="monster-overlay" aria-hidden="true">
 			<div
 				v-for="bar in monsterBars"
@@ -57,6 +81,10 @@
 			<div class="player-status__row">
 				<span class="player-status__label">{{ t('hud.status.state') }}</span>
 				<span class="player-status__value" :class="`player-status__value--${status.state}`">{{ stateLabel }}</span>
+			</div>
+			<div class="player-status__row">
+				<span class="player-status__label">{{ t('hud.status.preset') }}</span>
+				<span class="player-status__value">{{ selectedPreset ? t(`start.${selectedPreset}`) : '' }}</span>
 			</div>
 			<div class="player-status__row">
 				<span class="player-status__label">{{ t('hud.status.life') }}</span>
@@ -164,12 +192,15 @@ import {
 	Material,
 	MathUtils,
 	Mesh,
+	MeshBasicMaterial,
 	MeshStandardMaterial,
 	Object3D,
 	PCFSoftShadowMap,
 	PerspectiveCamera,
 	PlaneGeometry,
+	PointLight,
 	Scene,
+	SphereGeometry,
 	Texture,
 	TextureLoader,
 	Vector3,
@@ -185,13 +216,17 @@ import { readStoredLocale, storeLocale, type AppLocale } from '~/i18n/language'
 import { loadBestRecord, saveBestRecord } from '~/game/records'
 
 import {
+	BUILDING_CONFIG,
+	CAMERA_DIRECTOR_CONFIG,
 	COMBAT_AGGRESSION_CONFIG,
 	DEAD_TREE_CONFIG,
 	DAY_CYCLE_CONFIG,
 	ENVIRONMENT_CONFIG,
+	EVENT_CONFIG,
 	MONSTER_CONFIG,
 	MONSTER_GUARDIAN_CONFIG,
 	PLAYER_CONFIG,
+	PRESET_CONFIG,
 	PROGRESSION_CONFIG,
 	SKILL_CONFIG,
 	TREE_RESOURCE_CONFIG,
@@ -202,9 +237,14 @@ import {
 	type PlayerAnimationController,
 } from '~/game/player/animations'
 import {
+	createCameraDirector,
+	type CameraDirector,
+} from '~/game/player/camera-director'
+import {
 	createPlayerAgent,
 	expForLevel,
 	type PlayerAgent,
+	type PlayerPresetId,
 } from '~/game/player/agent'
 import {
 	createEnvironmentObjects,
@@ -230,6 +270,16 @@ import {
 	type MonsterUpdateContext,
 } from '~/game/resources/monsters'
 import {
+	createProjectileManager,
+	type ActiveProjectile,
+	type ProjectileManager,
+} from '~/game/resources/projectiles'
+import {
+	createBuildingManager,
+	type Building,
+	type BuildingManager,
+} from '~/game/resources/buildings'
+import {
 	createDayCycle,
 	type DayCycleState,
 } from '~/game/time/day-cycle'
@@ -237,6 +287,8 @@ import {
 	createLightingController,
 	type LightingController,
 } from '~/game/time/lighting'
+import { eventsForDay, type ScheduledEvent } from '~/game/events/scheduler'
+import { loadRunState, saveRunState, clearRunState, type RunSaveState } from '~/game/save'
 
 defineOptions({
 	name: 'GameScene',
@@ -473,6 +525,17 @@ let playerAnimation: PlayerAnimationController | null = null
 let playerModel: Object3D | null = null
 let renderer: WebGLRenderer | null = null
 let scene: Scene | null = null
+let cameraDirector: CameraDirector | null = null
+let projectileManager: ProjectileManager | null = null
+let buildingManager: BuildingManager | null = null
+const buildingObjects = new Map<string, Group>()
+const projectileMeshes = new Map<number, Mesh>()
+let cameraShakeOffsetX = 0
+let cameraShakeOffsetZ = 0
+let pendingRaid = { day: 0, count: 0 }
+let lastDayEvents: ScheduledEvent[] = []
+let goldenTreeId: string | null = null
+let goldenTreeBonus = 0
 
 // 게임 시계: 배속/일시정지를 지원하기 위해 실시간과 분리된 누적 시간 (ms)
 let gameNow = 0
@@ -505,8 +568,9 @@ const CAMERA_OFFSET = new Vector3(0, 180, 240)
 const MINIMAP_SIZE = 180
 
 onMounted(() => {
-	createScene()
+	// 씬은 시작 오버레이의 프리셋/이어하기 선택 후에 만든다 (자동 시작 안 함).
 	bestRecord.value = loadBestRecord(localStorage)
+	loadedSave.value = loadRunState(localStorage)
 })
 
 onUnmounted(() => {
@@ -551,11 +615,40 @@ function createScene() {
 	// 初始化昼夜循环
 	dayCycle = createDayCycle(DAY_CYCLE_CONFIG)
 
+	// Phase 2/3 integrations: camera director, projectile manager, building manager.
+	cameraDirector = createCameraDirector(CAMERA_DIRECTOR_CONFIG)
+	const demonRanged = MONSTER_CONFIG.speciesBehavior?.Demon?.ranged
+	const projectileSpeed = demonRanged?.projectileSpeed ?? 110
+	projectileManager = createProjectileManager(
+		{ speedUnitsPerSecond: projectileSpeed },
+		{
+			onHit: (damage: number) => {
+				if (!playerAgent) return
+				playerAgent.applyDamage(damage)
+				dayDamageTaken += damage
+				spawnDamagePopup(playerAgent.position[0], 8, playerAgent.position[1], `-${damage}`, 'hurt')
+				logEvent(t('hud.log.hurt', { count: damage }), 'hurt')
+				if (!playerAgent.playerAlive) {
+					deathCause.value = 'slain'
+					playerAlive.value = false
+					gameOver.value = true
+					recordRun()
+				}
+				cameraDirector?.triggerHit(gameNow)
+			},
+		},
+	)
+	buildingManager = createBuildingManager(BUILDING_CONFIG)
+	pendingRaid = { day: 0, count: 0 }
+	lastDayEvents = []
+	goldenTreeId = null
+	goldenTreeBonus = 0
+
 	addEnvironment(scene)
 	createTrees(scene)
 	createEnvObjects(scene)
 	createMonsters(scene)
-	createPlayer(scene)
+	createPlayer(scene, selectedPreset.value ?? 'balanced')
 	window.addEventListener('resize', handleResize)
 	animationFrame = window.requestAnimationFrame(renderFrame)
 }
@@ -938,6 +1031,36 @@ function showDaySummary() {
 
 // ===== 최고 기록 =====
 const bestRecord = ref<{ days: number; kills: number } | null>(null)
+
+// ===== 2·3단계 고도화: 시작 오버레이/프리셋/저장/이벤트/카메라/건축/투사체 =====
+const PRESET_IDS: PlayerPresetId[] = ['aggressive', 'balanced', 'survivor']
+const runStarted = ref(false)
+const selectedPreset = ref<PlayerPresetId | null>(null)
+const loadedSave = ref<RunSaveState | null>(null)
+const vignetteIntensity = ref(0)
+
+/** 시작 오버레이 표시 여부: 저장된 데이터가 있으면 이어하기·새로 시작 둘 다 노출, 없으면 프리셋 3개만 */
+const presets = computed(() => !runStarted.value)
+
+function pickPreset(preset: PlayerPresetId): void {
+	selectedPreset.value = preset
+	startRun(preset, null)
+}
+
+function continueSave(): void {
+	if (!loadedSave.value || !loadedSave.value.preset) return
+	selectedPreset.value = loadedSave.value.preset
+	startRun(loadedSave.value.preset, loadedSave.value)
+}
+
+function startRun(preset: PlayerPresetId, saveState: RunSaveState | null): void {
+	loadedSave.value = saveState
+	runStarted.value = true
+	// 씬 생성은 기존 createScene을 재활용 (없으면 새로 만들고, 세이브 복원이면 applySavedState로 덮어쓴다)
+	createScene()
+	if (saveState) applySavedState(saveState)
+	autosaveCurrentRun()
+}
 function recordRun() {
 	bestRecord.value = saveBestRecord(localStorage, {
 		days: Math.max(0, currentDay.value - 1),
@@ -984,7 +1107,7 @@ function spawnTreeVisual(tree: TreeResource) {
 	treeGroup?.add(object)
 }
 
-function createPlayer(targetScene: Scene) {
+function createPlayer(targetScene: Scene, preset: PlayerPresetId) {
 	const playerRoot = new Group()
 	playerRoot.position.set(PLAYER_START[0], 0, PLAYER_START[1])
 	targetScene.add(playerRoot)
@@ -1029,7 +1152,8 @@ function createPlayer(targetScene: Scene) {
 		weaponPowerPerTier: WEAPON_CONFIG.powerPerTier,
 		reserveWood: WEAPON_CONFIG.reserveWood,
 		worldRadius: WORLD_RADIUS,
-		collisionCheck: pos => checkCollision(pos),
+		collisionCheck: pos => checkCollision(pos) || (buildingManager?.blocks(pos) ?? false),
+		presetWeights: PRESET_CONFIG[preset],
 		treeResources: () => treeResources,
 		// 살아있는 모든 몬스터를 후보로 노출한다:
 		// - hostile=true(chase/attack/hit)인 몬스터만 도망 판정 대상
@@ -1101,7 +1225,16 @@ function renderFrame() {
 			gameOver.value = true
 			recordRun()
 		}
+		// 2·3단계: 오늘의 이벤트를 결정하고 (밤습격 예약 + 황금나무 선정) 다음 야간에 풀어낸다.
+		processDayEvents(dayResult.dayNumber)
+		// 건축 매니저에 오늘 건설을 시도시킨다 (모닥불 + 울타리 자동 배치).
+		tryAutoBuild(dayResult.dayNumber)
+		// 일차 변경 시 자동 저장 — 다음 프레임 전이면 같은 키로 덮어쓴다.
+		autosaveCurrentRun()
 	}
+
+	// 밤으로 막 진입하면 예약된 습격을 스폰한다 (낙오된 상태에서는 호출되지 않으므로 멱등).
+	maybeSpawnNightRaid()
 
 	// 更新光照
 	if (dayCycle && lightingController) {
@@ -1151,6 +1284,14 @@ function renderFrame() {
 	pruneCombatLog()
 	if (playerAgent.lastCollectedTree) {
 		replaceTreeWithDeadModel(playerAgent.lastCollectedTree, now)
+		if (goldenTreeId && playerAgent.lastCollectedTree.id === goldenTreeId) {
+			const bonus = goldenTreeBonus
+			awardWood(bonus)
+			logEvent(t('hud.log.goldenCollected', { count: bonus }), 'kill')
+			showRewardToast(bonus)
+			goldenTreeId = null
+			goldenTreeBonus = 0
+		}
 		playerAgent.lastCollectedTree = null
 	}
 	if (playerAgent.animation !== prevAnim && playerAnimation) {
@@ -1163,7 +1304,8 @@ function renderFrame() {
 	// 4. 现有系统
 	updateFadingTrees(now)
 	playerAnimation?.update(delta)
-	updateCamera()
+	updateProjectiles(delta)
+	updateCamera(delta)
 	renderer.render(scene, camera)
 	drawMinimap()
 	processRespawns()
@@ -1188,6 +1330,14 @@ function updateMonsters(delta: number, now: number) {
 			|| playerAgent.state === 'hunting',
 		playerIsFleeing: playerAgent.state === 'fleeing',
 		isNight: dayCycle?.state.isNight ?? false,
+		// 모닥불 반경 안이면 실효 탐지 반경이 감쇠된다 (각 모닥불이 곱셈으로 작용).
+		detectionMultiplier: buildingManager?.detectionMultiplierAt(playerAgent.position) ?? 1,
+		// 울타리: 몬스터가 직진으로 막히면 ±π/6·±π/3·±π/2 팬으로 우회 시도 (MONSTER_DETOUR_OFFSETS).
+		obstacleCheck: buildingManager ? pos => buildingManager!.blocks(pos) : undefined,
+		// 원거리 종족 (Demon 등) 발사: 게임 로직의 projectile manager로 위임 (시각화도 거기서).
+		onRangedAttack: projectileManager ? (from, to, damage) => {
+			projectileManager!.spawn(from, to, damage)
+		} : undefined,
 		incomingPlayerHits: pendingPlayerHits,
 		onAttackPlayer: () => {
 			// 몬스터 공격: 나무 대신 체력을 깎는다 (HP 0 = 사망)
@@ -1202,6 +1352,7 @@ function updateMonsters(delta: number, now: number) {
 				gameOver.value = true
 				recordRun()
 			}
+			cameraDirector?.triggerHit(gameNow)
 		},
 	}
 
@@ -1342,17 +1493,49 @@ function spawnNewTree() {
 	spawnTreeVisual(newTree)
 }
 
-function updateCamera() {
+function updateCamera(deltaSeconds: number) {
 	if (!camera || !playerModel || !orbitControls) return
+
+	// 2·3단계: 카메라 연출 감독의 지시에 따라 거리/포커스/셰이크를 매 프레임 갱신한다.
+	let directive = null
+	if (cameraDirector && playerAgent) {
+		directive = cameraDirector.update({
+			deltaSeconds,
+			nowMs: gameNow,
+			playerPosition: playerAgent.position,
+			threatPosition: playerAgent.attackTarget?.position ?? null,
+			bossEngaged: activeBossId.value != null,
+			healthRatio: Math.min(1, playerAgent.health / Math.max(1, playerAgent.maxHealth)),
+		})
+		vignetteIntensity.value = directive.vignetteIntensity
+	}
+	const focus = directive?.focusPoint
+	const focusPos = focus
+		? new Vector3(focus[0], 0, focus[1])
+		: playerModel.position
 
 	if (cameraMode.value === 'follow') {
 		orbitControls.enabled = false
-		const target = playerModel.position
+		// 감독 거리 배율 (기본 1 → 교전 줌인 0.75 등) 적용
+		const scale = directive?.distanceScale ?? 1
+		const shake = directive?.shakeIntensity ?? 0
+		// 셰이크: 강도에 비례해 X/Z 평면에서 작은 흔들림 오프셋 (Math.random은 view 레이어 한정)
+		if (shake > 0.001) {
+			cameraShakeOffsetX = (Math.random() - 0.5) * shake * CAMERA_DIRECTOR_CONFIG.shakeDecayPerSecond
+			cameraShakeOffsetZ = (Math.random() - 0.5) * shake * CAMERA_DIRECTOR_CONFIG.shakeDecayPerSecond
+		} else {
+			cameraShakeOffsetX = 0
+			cameraShakeOffsetZ = 0
+		}
 		camera.position.lerp(
-			new Vector3(target.x + CAMERA_OFFSET.x, target.y + CAMERA_OFFSET.y, target.z + CAMERA_OFFSET.z),
+			new Vector3(
+				focusPos.x + CAMERA_OFFSET.x * scale + cameraShakeOffsetX,
+				focusPos.y + CAMERA_OFFSET.y * scale,
+				focusPos.z + CAMERA_OFFSET.z * scale + cameraShakeOffsetZ,
+			),
 			0.08,
 		)
-		camera.lookAt(target.x, target.y + 45, target.z)
+		camera.lookAt(focusPos.x, focusPos.y + 45, focusPos.z)
 	} else {
 		orbitControls.enabled = true
 		orbitControls.update()
@@ -1510,17 +1693,252 @@ function handleResize() {
 }
 
 function restartGame() {
+	// 게임 종료 후 다시 시작: 씬을 폐기하고 시작 오버레이로 돌아간다 (같은/다른 프리셋 모두 재선택 가능).
 	disposeScene()
+	clearRunState(localStorage)
 
-	// 重置游戏状态
-	currentDay.value = 1
-	playerAlive.value = true
+	// 게임 종료/플레이 상태 리셋 — gameOver를 함께 false로 돌려야 오버레이가 풀린다.
 	gameOver.value = false
+	playerAlive.value = true
 	deathCause.value = 'starvation'
 	lowWoodWarning.value = false
-	bestRecord.value = loadBestRecord(localStorage)
+	currentDay.value = 1
+	choppingProgress.value = 0
+	woodCount.value = 0
+	monsterKills.value = 0
+	dayWoodGained = 0
+	dayKills = 0
+	dayDamageTaken = 0
+	vignetteIntensity.value = 0
 
-	createScene()
+	loadedSave.value = null
+	selectedPreset.value = null
+	runStarted.value = false
+	bestRecord.value = loadBestRecord(localStorage)
+}
+
+// ===== 2·3단계: 이벤트 처리 / 자동 건설 / 밤습격 / 자동 저장 / 복원 =====
+function processDayEvents(dayNumber: number) {
+	if (!playerAgent) return
+	lastDayEvents = eventsForDay(EVENT_CONFIG, dayNumber)
+	for (const ev of lastDayEvents) {
+		if (ev.type === 'nightRaid') {
+			pendingRaid = { day: dayNumber, count: ev.count }
+			const msg = t('hud.log.raidAlert', { count: ev.count })
+			showToast(msg)
+			logEvent(msg, 'boss')
+		} else if (ev.type === 'goldenTree') {
+			pickGoldenTree(ev.woodBonus)
+			const msg = t('hud.log.goldenTree', { count: ev.woodBonus })
+			showToast(msg)
+			logEvent(msg, 'kill')
+		}
+	}
+}
+
+function pickGoldenTree(bonus: number) {
+	if (!playerAgent) return
+	const candidates = treeResources.filter(tree => !tree.collected)
+	if (!candidates.length) return
+	// 결정성: tree.id 사전순으로 day % length 번째를 황금 처리. (비결정적 Math.random 대안)
+	candidates.sort((a, b) => a.id.localeCompare(b.id))
+	const pickIndex = candidates.length ? (currentDay.value % candidates.length) : 0
+	const pick = candidates[pickIndex]
+	goldenTreeId = pick.id
+	goldenTreeBonus = bonus
+	tintGoldenTree(pick.id)
+}
+
+function tintGoldenTree(treeId: string) {
+	const obj = treeObjects.get(treeId)
+	if (!obj) return
+	obj.traverse(child => {
+		if (child instanceof Mesh) {
+			const material = (child.material as MeshStandardMaterial)
+			if (!material) return
+			material.emissive = new MeshStandardMaterial({ color: '#ffd166' }).emissive
+			material.color = new MeshStandardMaterial({ color: '#ffc857' }).color
+		}
+	})
+}
+
+function maybeSpawnNightRaid() {
+	if (!scene || !dayCycle) return
+	if (!pendingRaid.count || pendingRaid.day !== currentDay.value) return
+	if (!dayCycle.state.isNight) return
+	const raidDay = pendingRaid.day
+	const raidCount = pendingRaid.count
+	pendingRaid = { day: 0, count: 0 }
+	for (let i = 0; i < raidCount; i++) {
+		const modelIndex = i % Math.max(1, MONSTER_CONFIG.modelUrls.length)
+		const resource = createRespawnMonster(
+			MONSTER_CONFIG,
+			`raid-${raidDay}-${i}`,
+			modelIndex,
+			raidDay,
+		)
+		// 습격 몬스터: 자기 활동 반경/탐지 무시하고 충분히 오래 추격한다.
+		resource.activityRadius = WORLD_RADIUS
+		spawnMonsterVisual(resource, scene)
+		const spawned = monsterAgents.find(a => a.resource.id === resource.id)
+		if (spawned) spawned.provokedUntil = Number.POSITIVE_INFINITY
+	}
+	const msg = t('hud.log.raidBegin')
+	showToast(msg)
+	logEvent(msg, 'boss')
+}
+
+function tryAutoBuild(dayNumber: number) {
+	if (!buildingManager || !playerAgent || !scene) return
+	const result = buildingManager.maybeBuild({
+		day: dayNumber,
+		wood: playerAgent.woodCollected,
+		reserveWood: WEAPON_CONFIG.reserveWood,
+		playerPosition: playerAgent.position,
+	})
+	if (!result.built.length) return
+	playerAgent.woodCollected -= result.woodSpent
+	woodCount.value = Math.max(0, playerAgent.woodCollected)
+	for (const building of result.built) {
+		if (building.type === 'campfire') {
+			renderCampfire(building)
+			logEvent(t('hud.log.buildCampfire', { count: BUILDING_CONFIG.campfireCostWood }), 'level')
+		} else if (building.type === 'fence') {
+			renderFence(building)
+		}
+	}
+}
+
+function renderCampfire(building: Building) {
+	if (!scene) return
+	const group = new Group()
+	group.position.set(building.position[0], 0, building.position[1])
+
+	// 장작 더미 (단순한 원기둥)
+	const logMat = new MeshStandardMaterial({ color: '#5b3a1a', roughness: 0.9 })
+	for (let i = 0; i < 3; i++) {
+		const log = new Mesh(new SphereGeometry(2.5, 6, 6), logMat)
+		log.position.set((i - 1) * 2.2, 1, 0)
+		group.add(log)
+	}
+	// 화염
+	const flame = new Mesh(
+		new SphereGeometry(4, 8, 8),
+		new MeshBasicMaterial({ color: '#ff8c00', transparent: true, opacity: 0.75 }),
+	)
+	flame.position.y = 5
+	group.add(flame)
+	// 포인트 라이트 (배치 가능한 강한 광원)
+	const pointLight = new PointLight('#ffaa55', 2, BUILDING_CONFIG.campfireLightRadius, 1.6)
+	pointLight.position.y = 7
+	group.add(pointLight)
+
+	scene.add(group)
+	buildingObjects.set(building.id, group)
+}
+
+function renderFence(building: Building) {
+	if (!scene) return
+	const group = new Group()
+	group.position.set(building.position[0], 0, building.position[1])
+	group.rotation.y = building.bearing
+	const post = new Mesh(
+		new PlaneGeometry(0.6, BUILDING_CONFIG.fenceBlockRadius * 2),
+		new MeshStandardMaterial({ color: '#3b2a1a', side: 2 }),
+	)
+	group.add(post)
+	scene.add(group)
+	buildingObjects.set(building.id, group)
+}
+
+function autosaveCurrentRun() {
+	if (!playerAgent || !dayCycle) return
+	saveRunState(localStorage, {
+		savedAtMs: Date.now(),
+		day: currentDay.value,
+		elapsedMsInDay: dayCycle.state.dayProgress * DAY_CYCLE_CONFIG.realMsPerDay,
+		preset: selectedPreset.value ?? 'balanced',
+		level: playerAgent.level,
+		exp: playerAgent.exp,
+		health: playerAgent.health,
+		maxHealth: playerAgent.maxHealth,
+		attackDamage: playerAgent.attackDamage,
+		speed: playerAgent.speed,
+		wood: playerAgent.woodCollected,
+		kills: monsterKills.value,
+		weaponTier: playerAgent.weaponTier,
+		buildings: buildingManager ? buildingManager.snapshot().map(b => ({
+			type: b.type,
+			position: [b.position[0], b.position[1]] as PlanePoint,
+			bearing: b.bearing,
+			segmentIndex: b.segmentIndex,
+			builtDay: b.builtDay,
+		})) : [],
+	})
+}
+
+function applySavedState(state: RunSaveState) {
+	if (!playerAgent || !dayCycle || !buildingManager) return
+	// 날짜 진행 복원
+	const totalMs = (state.day - 1) * DAY_CYCLE_CONFIG.realMsPerDay + state.elapsedMsInDay
+	dayCycle.state.totalElapsedMs = totalMs
+	dayCycle.state.currentDay = state.day
+	dayCycle.state.dayProgress = (state.elapsedMsInDay) / DAY_CYCLE_CONFIG.realMsPerDay
+	currentDay.value = state.day
+	// 플레이어 능력치/스탯 직접 주입
+	playerAgent.exp = state.exp
+	playerAgent.level = state.level
+	playerAgent.health = state.health
+	playerAgent.maxHealth = state.maxHealth
+	playerAgent.attackDamage = state.attackDamage
+	playerAgent.weaponTier = state.weaponTier
+	playerAgent.weaponPower = state.weaponTier * WEAPON_CONFIG.weaponPowerPerTier
+	playerAgent.woodCollected = state.wood
+	monsterKills.value = state.kills
+	// 저장된 건축을 복원하고 시각화
+	buildingManager.restore(state.buildings.map(b => ({
+		type: b.type,
+		position: [b.position[0], b.position[1]] as PlanePoint,
+		bearing: b.bearing,
+		segmentIndex: b.segmentIndex,
+		builtDay: b.builtDay,
+	})))
+	for (const b of buildingManager.buildings) {
+		if (b.type === 'campfire') renderCampfire(b)
+		else renderFence(b)
+	}
+}
+
+function updateProjectiles(deltaSeconds: number) {
+	if (!projectileManager || !scene) return
+	projectileManager.update(deltaSeconds)
+	const alive = projectileManager.active()
+	const seenIds = new Set<number>()
+	for (const flight of alive) {
+		seenIds.add(flight.id)
+		let mesh = projectileMeshes.get(flight.id)
+		if (!mesh) {
+			mesh = new Mesh(
+				new SphereGeometry(3.5, 8, 8),
+				new MeshBasicMaterial({ color: '#ff6bd6', transparent: true, opacity: 0.85 }),
+			)
+			mesh.userData.id = flight.id
+			scene.add(mesh)
+			projectileMeshes.set(flight.id, mesh)
+		}
+		const px = flight.from[0] + (flight.to[0] - flight.from[0]) * flight.progress
+		const pz = flight.from[1] + (flight.to[1] - flight.from[1]) * flight.progress
+		mesh.position.set(px, 6, pz)
+	}
+	// 끝난 비행 메시 회수 (manager가 도착한 비행을 제거했으므로 seenIds에 없는 것은 정리)
+	for (const [id, mesh] of [...projectileMeshes]) {
+		if (seenIds.has(id)) continue
+		mesh.removeFromParent()
+		mesh.geometry.dispose()
+		const m = mesh.material as MeshBasicMaterial
+		m.dispose()
+		projectileMeshes.delete(id)
+	}
 }
 
 function disposeScene() {
@@ -1549,6 +1967,37 @@ function disposeScene() {
 		})
 		scene.clear()
 	}
+
+	// 2·3단계: 모닥불/울타리 그룹과 투사체 메시는 scene.add로 들어갔지만 Group은 Mesh가 아니라
+	// traverse에서 정리되지 않는다. Map에 보관된 참조를 명시적으로 해제한다.
+	for (const group of buildingObjects.values()) {
+		group.traverse(child => {
+			if (child instanceof Mesh) {
+				child.geometry?.dispose()
+				const mats = Array.isArray(child.material) ? child.material : [child.material]
+				mats.forEach(material => {
+					for (const value of Object.values(material)) {
+						if (value instanceof Texture) value.dispose()
+					}
+					material.dispose()
+				})
+			}
+		})
+		group.removeFromParent()
+	}
+	buildingObjects.clear()
+	for (const mesh of projectileMeshes.values()) {
+		mesh.geometry?.dispose()
+		const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+		mats.forEach(material => {
+			for (const value of Object.values(material)) {
+				if (value instanceof Texture) value.dispose()
+			}
+			material.dispose()
+		})
+		mesh.removeFromParent()
+	}
+	projectileMeshes.clear()
 
 	playerAgent = null
 	playerAnimation = null
@@ -1584,6 +2033,9 @@ function disposeScene() {
 	ambientLight = null
 	keyLight = null
 	rimLight = null
+	cameraDirector = null
+	projectileManager = null
+	buildingManager = null
 }
 </script>
 
@@ -2073,6 +2525,100 @@ function disposeScene() {
 	&:hover {
 		background: rgba(53, 244, 255, 0.3);
 		box-shadow: 0 0 20px rgba(53, 244, 255, 0.3);
+	}
+}
+
+.vignette {
+	position: absolute;
+	inset: 0;
+	z-index: 4;
+	pointer-events: none;
+	background: radial-gradient(circle at center, rgba(0, 0, 0, 0) 30%, rgba(0, 0, 0, 0.95) 100%);
+	transition: opacity 0.18s ease-out;
+}
+
+.start-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 50;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: rgba(3, 12, 24, 0.82);
+	backdrop-filter: blur(10px);
+}
+
+.start-card {
+	max-width: 720px;
+	padding: 32px 36px;
+	border: 1px solid rgba(53, 244, 255, 0.42);
+	border-radius: 16px;
+	background: rgba(3, 12, 24, 0.92);
+	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+	color: #dffcff;
+	font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+.start-card__title {
+	margin: 0 0 6px;
+	font-size: 26px;
+	font-weight: 800;
+	color: #ffc857;
+	text-shadow: 0 0 18px rgba(255, 200, 87, 0.5);
+}
+
+.start-card__subtitle {
+	margin: 0 0 24px;
+	font-size: 14px;
+	opacity: 0.78;
+}
+
+.start-card__presets {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+	gap: 12px;
+}
+
+.start-preset {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 16px 18px;
+	border: 1px solid rgba(53, 244, 255, 0.3);
+	border-radius: 12px;
+	background: rgba(53, 244, 255, 0.06);
+	color: #dffcff;
+	text-align: left;
+	cursor: pointer;
+	transition: transform 0.15s ease-out, background 0.15s ease-out, border-color 0.15s ease-out;
+
+	&:hover {
+		transform: translateY(-2px);
+		background: rgba(53, 244, 255, 0.12);
+		border-color: rgba(53, 244, 255, 0.6);
+	}
+}
+
+.start-preset__name {
+	font-size: 16px;
+	font-weight: 700;
+	color: #35f4ff;
+}
+
+.start-preset__desc {
+	font-size: 12px;
+	opacity: 0.75;
+	line-height: 1.45;
+}
+
+.start-preset--continue {
+	grid-column: 1 / -1;
+	background: rgba(255, 200, 87, 0.12);
+	border-color: rgba(255, 200, 87, 0.55);
+
+	.start-preset__name {
+		color: #ffc857;
+		font-size: 18px;
 	}
 }
 

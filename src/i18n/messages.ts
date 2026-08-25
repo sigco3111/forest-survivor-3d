@@ -27,6 +27,7 @@ export const messages = {
 			status: {
 				title: 'Player Status',
 				state: 'State',
+				preset: 'Style',
 				states: {
 					exploring: 'Exploring',
 					approaching: 'To tree',
@@ -63,6 +64,12 @@ export const messages = {
 				bossKill: 'BOSS slain! +{count} wood',
 				slam: 'Slam!',
 				fury: 'Fury unleashed!',
+				raidAlert: 'Omen: {count} monsters stir for a night raid...',
+				raidBegin: 'The night raid begins!',
+				goldenTree: 'A golden tree gleams nearby (+{count} wood)',
+				goldenCollected: 'Golden tree felled! +{count} wood',
+				buildCampfire: 'Campfire built (-{count} wood)',
+				buildFence: 'Palisade raised (-{count} wood)',
 			},
 			summary: {
 				title: 'Day {day} complete',
@@ -72,6 +79,19 @@ export const messages = {
 		camera: {
 			free: 'Switch to free camera',
 			follow: 'Switch to follow camera',
+		},
+		start: {
+			title: 'Choose your playstyle',
+			subtitle: 'Your choice shapes every level-up of this run.',
+			aggressive: 'Aggressive',
+			aggressiveDesc: 'Double attack growth and a wide hunt range, but a frail body.',
+			balanced: 'Balanced',
+			balancedDesc: 'Steady growth across attack, health and speed.',
+			survivor: 'Survivor',
+			survivorDesc: 'A hardy body, steady stride, and faster rest regeneration.',
+			begin: 'Begin the run',
+			continue: 'Continue · Day {day}',
+			newGame: 'New run',
 		},
 		gameOver: {
 			title: 'Game over',
@@ -110,6 +130,7 @@ export const messages = {
 			status: {
 				title: '玩家状态',
 				state: '状态',
+				preset: '流派',
 				states: {
 					exploring: '探索中',
 					approaching: '前往树木',
@@ -146,6 +167,12 @@ export const messages = {
 				bossKill: '击败首领！+{count} 木材',
 				slam: '横扫打击！',
 				fury: '狂暴发动！',
+				raidAlert: '预兆：{count} 只怪物正在集结夜袭……',
+				raidBegin: '夜袭开始了！',
+				goldenTree: '附近闪耀着一棵黄金树（+{count} 木材）',
+				goldenCollected: '黄金树已砍倒！+{count} 木材',
+				buildCampfire: '建造了篝火（-{count} 木材）',
+				buildFence: '竖起了栅栏（-{count} 木材）',
 			},
 			summary: {
 				title: '第 {day} 天结束',
@@ -155,6 +182,19 @@ export const messages = {
 		camera: {
 			free: '切换自由视角',
 			follow: '切换跟随视角',
+		},
+		start: {
+			title: '选择你的流派',
+			subtitle: '你的选择将决定本次冒险的每次升级方向。',
+			aggressive: '激进',
+			aggressiveDesc: '攻击成长翻倍、狩猎范围更广，但身板脆弱。',
+			balanced: '均衡',
+			balancedDesc: '攻击、生命与速度稳定成长。',
+			survivor: '生存',
+			survivorDesc: '体格强健、步伐稳健，脱战回复更快。',
+			begin: '开始冒险',
+			continue: '继续 · 第 {day} 天',
+			newGame: '新的开始',
 		},
 		gameOver: {
 			title: '游戏结束',
@@ -193,6 +233,7 @@ export const messages = {
 			status: {
 				title: '플레이어 상태',
 				state: '상태',
+				preset: '성향',
 				states: {
 					exploring: '탐색 중',
 					approaching: '나무로 이동',
@@ -229,6 +270,12 @@ export const messages = {
 				bossKill: '보스 처치! +{count} 나무',
 				slam: '광역 강타!',
 				fury: '분노 발동!',
+				raidAlert: '조짐: 몬스터 {count}마리가 밤습격을 준비한다...',
+				raidBegin: '밤습격이 시작됐다!',
+				goldenTree: '황금 나무가 반짝인다 (+{count} 나무)',
+				goldenCollected: '황금 나무 벌목! +{count} 나무',
+				buildCampfire: '모닥불을 지었다 (-{count} 나무)',
+				buildFence: '울타리를 세웠다 (-{count} 나무)',
 			},
 			summary: {
 				title: '{day}일차 종료',
@@ -238,6 +285,19 @@ export const messages = {
 		camera: {
 			free: '자유 시점으로 전환',
 			follow: '따라가기 시점으로 전환',
+		},
+		start: {
+			title: '플레이 스타일을 선택하세요',
+			subtitle: '선택에 따라 이번 런의 모든 레벨업이 달라집니다.',
+			aggressive: '맹공격',
+			aggressiveDesc: '공격 성장 2배, 넓은 사냥 범위 — 대신 몸이 연약합니다.',
+			balanced: '균형',
+			balancedDesc: '공격·생명력·속도가 고르게 성장합니다.',
+			survivor: '생존가',
+			survivorDesc: '단단한 몸과 꾸준한 걸음, 빠른 비전투 회복.',
+			begin: '생존 시작',
+			continue: '이어하기 · {day}일차',
+			newGame: '새로 시작',
 		},
 		gameOver: {
 			title: '게임 오버',

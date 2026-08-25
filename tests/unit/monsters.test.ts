@@ -695,4 +695,161 @@ describe('monster agent', () => {
     agent.update(0.5, 1_800, context)
     expect(agent.state).not.toBe('hit')
   })
+
+  it('fleeHealthRatio monsters flee instead of staggering when badly wounded', () => {
+    const resource = makeResource({ health: 100, maxHealth: 100, fleeHealthRatio: 0.35, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    // 체력 100 → 30 (비율 0.3 ≤ 0.35): 경직 대신 도주
+    const hitContext = makeContext({ incomingPlayerHits: [{ id: 'monster', damage: 70 }] })
+    agent.update(0, 1_000, hitContext)
+    expect(resource.health).toBe(30)
+    expect(agent.state).toBe('flee')
+    expect(agent.animation).toBe('run')
+
+    // 안전 거리 확보 전: 도주 상태를 유지하고 매 프레임 플레이어 반대 방향으로 도망친다
+    agent.position = [50, 0]
+    agent.update(0.1, 1_500, makeContext({ playerPosition: [10, 0], playerIsChopping: false }))
+    expect(agent.state).toBe('flee')
+    expect(agent.target[0]).toBeGreaterThan(50) // 플레이어 반대 방향 = +X
+
+    // 도주는 플레이어 반대 방향으로 진행된다
+
+    // 안전 거리(탐지 반경 × fleeSafeDistanceMultiplier = 120 × 1.8 = 216) 확보 시 도주 종료 + 겁먹음
+    agent.position = [400, 0]
+    const safeContext = makeContext({ playerPosition: [10, 0], playerIsChopping: false })
+    agent.update(0.5, 2_000, safeContext)
+    expect(agent.state).toBe('idle')
+    expect(agent.coweredUntil).toBe(2_000 + 9_000)
+
+    // 겁먹은 상태에서는 자극받아도(팩 응집) 재추격하지 않는다
+    agent.position = [50, 0]
+    agent.provokedUntil = 20_000
+    agent.update(0, 3_000, makeContext({ playerIsChopping: true }))
+    expect(agent.state).toBe('idle')
+
+    // cower 만료 후에는 같은 자리에서 다시 추격한다
+    agent.update(0, 12_000, makeContext({ playerIsChopping: true }))
+    expect(agent.state).toBe('chase')
+  })
+
+  it('wounded cowards above the ratio still stagger like everyone else', () => {
+    const resource = makeResource({ health: 100, maxHealth: 100, fleeHealthRatio: 0.35, position: [0, 0] })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    // 체력 100 → 83 (비율 0.83 > 0.35): 평범한 경직
+    const hitContext = makeContext({ incomingPlayerHits: [{ id: 'monster', damage: 17 }] })
+    agent.update(0, 1_000, hitContext)
+    expect(agent.state).toBe('hit')
+    expect(agent.animation).toBe('hit')
+  })
+
+  it('ranged species hold their distance and fire projectiles instead of melee', () => {
+    const onAttackPlayer = vi.fn()
+    const onRangedAttack = vi.fn()
+    const resource = makeResource({ rangedRange: 70, attackCooldownMs: 1_000, position: [0, 0], speed: 40 })
+
+    // 사거리 70 안이지만 근접 거리(20) 밖에서 바로 공격 상태로 전환한다
+    const farContext = makeContext({ playerPosition: [50, 0], onAttackPlayer, onRangedAttack })
+    const agent = createMonsterAgent(resource)
+    agent.update(0, 0, farContext)
+    expect(agent.state).toBe('chase')
+    agent.update(0, 100, farContext)
+    expect(agent.state).toBe('attack')
+
+    // 쿨다운 도달 → 원거리 발사 (onAttackPlayer 아님)
+    agent.update(0, 1_200, farContext)
+    expect(onRangedAttack).toHaveBeenCalledTimes(1)
+    expect(onRangedAttack.mock.calls[0][2]).toBe(resource.attackDamage)
+    expect(onAttackPlayer).not.toHaveBeenCalled()
+
+    // 근접 거리로 들어오면 일반 근접 공격으로 전환된다
+    const closeContext = makeContext({ playerPosition: [10, 0], onAttackPlayer, onRangedAttack })
+    agent.update(0, 2_300, closeContext)
+    expect(onAttackPlayer).toHaveBeenCalledTimes(1)
+    expect(onRangedAttack).toHaveBeenCalledTimes(1)
+
+    // 사거리를 벗어나면 다시 추격한다 (근접 종족의 30 포기 로직 대신 자기 사거리 사용)
+    agent.update(0, 2_400, makeContext({ playerPosition: [90, 0], onAttackPlayer, onRangedAttack }))
+    expect(agent.state).toBe('chase')
+  })
+
+  it('dampens the effective detection radius with the campfire multiplier', () => {
+    const dayDamped = effectiveDetectionRadius({ detectionMultiplier: 0.45 })
+    expect(dayDamped).toBeCloseTo(135 * 0.45)
+
+    // 밤 확대와 모닥불 감쇠가 함께 곱해진다
+    const nightDamped = effectiveDetectionRadius({ isNight: true, detectionMultiplier: 0.45 })
+    expect(nightDamped).toBeCloseTo(135 * 1.5 * 0.45)
+
+    // 미지정 → 기존 동작 유지
+    expect(effectiveDetectionRadius({})).toBe(135)
+
+    // 모닥불 빛 안의 플레이어는 밤에도 덜 들킨다 (추격 게이트에 동일 적용)
+    const dampedNight = makeContext({ playerPosition: [180, 0], isNight: true, detectionMultiplier: 0.4 })
+    const dampedAgent = createMonsterAgent(makeResource({ health: 100 }))
+    dampedAgent.update(0, 0, dampedNight)
+    expect(dampedAgent.state).toBe('idle')
+  })
+
+  it('detours around obstacles and freezes when fully enclosed', () => {
+    const agent = createMonsterAgent(makeResource({ speed: 10 }))
+    agent.state = 'patrol'
+    agent.position = [0, 0]
+    agent.target = [10, 0]
+
+    // 직진 후보만 막힘 → 우회 팬의 다음 각도(+π/6)로 빠져나온다.
+    // baseAngle = atan2(dx, dz) = π/2 → 스텝 방향 (sin 2π/3, cos 2π/3)
+    agent.update(0.5, 0, makeContext({
+      playerIsChopping: false,
+      obstacleCheck: pos => pos[1] === 0 && pos[0] > 0,
+    }))
+    expect(agent.position[0]).toBeCloseTo(5 * Math.sin(Math.PI / 2 + Math.PI / 6))
+    expect(agent.position[1]).toBeCloseTo(5 * Math.cos(Math.PI / 2 + Math.PI / 6))
+
+    // 전부 막힘 → 제자리 유지
+    agent.position = [0, 0]
+    agent.update(0.5, 100, makeContext({ playerIsChopping: false, obstacleCheck: () => true }))
+    expect(agent.position).toEqual([0, 0])
+  })
+
+  it('carries special abilities from speciesBehavior into spawned resources', () => {
+    const config = {
+      modelUrls: ['/demon.glb'],
+      seed: 7,
+      count: 2,
+      radiusMeters: 500,
+      scaleRange: [1, 1] as [number, number],
+      patrolRadius: 80,
+      speed: 22,
+      detectionRadius: 120,
+      attackRadius: 20,
+      health: 100,
+      attackDamage: 10,
+      attackCooldownMs: 1_000,
+      activityRadius: 170,
+      modelScale: 6,
+      hitStunMs: 700,
+      // 단일 URL → modelNames[0] = 'Demon' 이므로 Demon 키로 검증한다
+      speciesBehavior: {
+        Demon: {
+          speedMultiplier: 1.25,
+          fleeHealthRatio: 0.35,
+          ranged: { range: 70, projectileSpeed: 110 },
+        },
+      } as Record<string, import('../../src/game/resources/monsters').SpeciesBehavior>,
+    }
+
+    const [spawned] = createMonsterResources(config)
+    expect(spawned.modelName).toBe('Demon')
+    expect(spawned.fleeHealthRatio).toBe(0.35)
+    expect(spawned.rangedRange).toBe(70)
+
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const respawned = createRespawnMonster(config, 'respawn-1', 0, 1)
+    expect(respawned.fleeHealthRatio).toBe(0.35)
+    expect(respawned.rangedRange).toBe(70)
+  })
 })
