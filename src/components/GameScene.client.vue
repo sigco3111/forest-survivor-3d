@@ -3236,15 +3236,16 @@ function disposeScene() {
 }
 
 // 업적 배지 패널: 전체 정의를 나열해 달성/미달성을 상시 보여준다 (트로피 금색 테마)
+// max-height는 750px 오프셋과 합쳐도 화면 하단에 ~30px 여백이 남도록 계산한 값이다.
 .achievement-panel {
 	position: absolute;
 	top: 750px;
 	left: 20px;
 	z-index: 2;
 	width: 180px;
-	max-height: 190px;
+	max-height: 155px;
 	overflow: auto;
-	padding: 10px 12px;
+	padding: 10px 12px 16px;
 	border: 1px solid rgba(255, 209, 102, 0.32);
 	border-radius: 12px;
 	background: rgba(3, 12, 24, 0.68);
