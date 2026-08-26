@@ -15,6 +15,10 @@ export const PLAYER_CONFIG = {
   regenHealthAmount: 2, // 비전투 중 체력 회복량 (틱당)
   regenIntervalMs: 1000, // 비전투 체력 회복 틱 간격
   criticalHealthRatio: 0.25, // 위기 체력 비율: 이하로 내려가면 교전을 접고 도주한다
+  damageTakenFloor: 0.3,      // 받는 피해 배율 하한 (방어 과누적 방지)
+  critChanceCeiling: 0.75,   // 치명타 확률 상한
+  critMultiplierCeiling: 5,   // 치명타 배율 상한
+  dodgeChanceCeiling: 0.75,  // 회피 확률 상한
   fleeSafeDistanceMeters: 250, // 이 거리만큼 벗어나면 도망을 종료하고 회복한다 (보스 장기 추격 대비)
 };
 
@@ -74,6 +78,7 @@ export const WEAPON_CONFIG = {
   attackPerTier: 6,        // 티어당 공격력 증가
   powerPerTier: 40,        // 티어당 전투력 증가 (소비한 나무보다 크게 — 강화가 항상 이득)
   reserveWood: 10,         // 강화 후에도 유지할 비상 나무 (자동 강화가 비축을 갈취하지 않도록)
+  maxTier: 10,             // 무기 강화 티어 상한 (강제 종료 — 비용 폭증 방지)
 };
 
 // 자동 스킬: 레벨 해금 + 쿨다운 자동 시전 (관전 재미의 고점)
@@ -133,6 +138,56 @@ export const SKILL_TREE_CONFIG = {
   },
 };
 
+// ===== Tier 3: 패시브 트리 (런 진행 마일스톤) =====
+// 처치/보스/카드 선택/도달 일차 누적 카운터가 임계에 도달하면 노드가 한 번 자동 해금된다.
+// 레벨 트리와 별개로 동작하므로 두 트리는 서로 누적된다.
+// 효과는 skill-tree의 SkillNodeEffects를 재사용하므로 기존 에이전트 필드에 그대로 적용된다.
+export const PASSIVE_TREE_CONFIG = {
+  nodes: [
+    // 레벨 마일스톤: 초반 안정적인 전투 흐름
+    { id: 'passive.level.5', trigger: { level: 5 }, effects: { damageTakenMultiplier: 0.98 }, labelKey: 'passive.level.5' },
+    // 처치 마일스톤: 공격력 보강 → 누적 처치가 곧 무기가 된다
+    { id: 'passive.kills.25', trigger: { totalKills: 25 }, effects: { bonusFlatDamage: 2 }, labelKey: 'passive.kills.25' },
+    { id: 'passive.kills.75', trigger: { totalKills: 75 }, effects: { bonusFlatDamage: 4 }, labelKey: 'passive.kills.75' },
+    { id: 'passive.kills.150', trigger: { totalKills: 150 }, effects: { bonusFlatDamage: 6 }, labelKey: 'passive.kills.150' },
+    // 처치 마일스톤: 회피 — 후반 누적 처치의 생존 보강
+    { id: 'passive.dodge.50', trigger: { totalKills: 50 }, effects: { dodgeChance: 0.05 }, labelKey: 'passive.dodge.50' },
+    { id: 'passive.dodge.200', trigger: { totalKills: 200 }, effects: { dodgeChance: 0.05 }, labelKey: 'passive.dodge.200' },
+    // 보스 마일스톤: 보스 1/3/5에 도달하면 강력한 보상
+    { id: 'passive.boss.1', trigger: { bossKills: 1 }, effects: { damageTakenMultiplier: 0.95 }, labelKey: 'passive.boss.1' },
+    { id: 'passive.boss.3', trigger: { bossKills: 3 }, effects: { bonusFlatDamage: 8 }, labelKey: 'passive.boss.3' },
+    { id: 'passive.boss.5', trigger: { bossKills: 5 }, effects: { damageTakenMultiplier: 0.92 }, labelKey: 'passive.boss.5' },
+    // 카드 선택 마일스톤: 스킬 사용성 강화
+    { id: 'passive.cards.15', trigger: { cardChoiceCount: 15 }, effects: { slamCooldownMultiplier: 0.85 }, labelKey: 'passive.cards.15' },
+    { id: 'passive.cards.40', trigger: { cardChoiceCount: 40 }, effects: { furyDurationMultiplier: 1.25 }, labelKey: 'passive.cards.40' },
+    // 일차 마일스톤: 후반 생존 보강
+    { id: 'passive.day.10', trigger: { dayReached: 10 }, effects: { collectRadiusMultiplier: 1.15 }, labelKey: 'passive.day.10' },
+    { id: 'passive.day.20', trigger: { dayReached: 20 }, effects: { extraRegenBonus: 1 }, labelKey: 'passive.day.20' },
+    // 종족별 마일스톤: 숙련 트리와 별도로 약한 보정
+    { id: 'passive.goblin.15', trigger: { speciesKills: { name: 'Goblin', count: 15 } }, effects: { dodgeChance: 0.05 }, labelKey: 'passive.goblin.15' },
+    { id: 'passive.skeleton.15', trigger: { speciesKills: { name: 'Skeleton', count: 15 } }, effects: { scanRangeMultiplier: 1.1 }, labelKey: 'passive.skeleton.15' },
+  ],
+};
+
+// ===== 영구 메타 perk (런 종료 시 보너스) =====
+// 메타 레벨 2/5/10/20/30에서 새 perk가 해금되어 다음 런의 시작에 적용된다.
+export const META_PERK_CONFIG = {
+  perks: [
+    { id: 'vitality', unlockMetaLevel: 2, effects: { startHealth: 20 }, labelKey: 'metaPerk.vitality' },
+    { id: 'edge', unlockMetaLevel: 5, effects: { startAttack: 2 }, labelKey: 'metaPerk.edge' },
+    { id: 'stockpile', unlockMetaLevel: 10, effects: { startWood: 8 }, labelKey: 'metaPerk.stockpile' },
+    { id: 'crit-mastery', unlockMetaLevel: 20, effects: { startCritChance: 0.05, startCritMultiplier: 0.2 }, labelKey: 'metaPerk.crit-mastery' },
+    { id: 'magnet', unlockMetaLevel: 30, effects: { startCollectRadiusMultiplier: 1.1 }, labelKey: 'metaPerk.magnet' },
+  ],
+  // 메타 레벨 보너스 cap (폭주 방지)
+  startHealthPerLevelCap: 60,
+  startAttackPerLevelCap: 8,
+  startWoodPerFiveLevelsCap: 30,
+  startCritChanceCap: 0.2,
+  startCritMultiplierCap: 0.5,
+  startCollectRadiusMultiplierCap: 1.5,
+};
+
 // 昼夜循环：1 分钟 = 游戏内 1 天
 export const DAY_CYCLE_CONFIG = {
   realMsPerDay: 60_000,        // 1 分钟 = 1 游戏天
@@ -190,6 +245,15 @@ export const COMBAT_AGGRESSION_CONFIG = {
   huntGiveUpRangeMultiplier: 6,   // 추격 포기 범위 = attackRangeMeters × 6 = 120
 };
 
+// ===== 방치형 티어 시스템: 보스 토벌 = 티어 상승 (무한 반복) =====
+// 몬스터는 티어마다 기하급수로 강해지고 플레이어 성장(선형)은 이를 따라잡지 못한다.
+// 의도된 설계: 특정 티어에서 벽 → 사망 → 메타 강화 → 더 깊은 티어 도전 (프레스티지 루프).
+export const TIER_CONFIG = {
+  // 티어당 체력/공격력 배율. 티어 N의 스케일 = scalePerTier^(N-1) (티어 1 = ×1).
+  // 1.25는 "티어 8~10에서 첫 벽"이 오는 완만한 곡선이다. 1 이하로 낮추면 성장이 꺼진다.
+  scalePerTier: 1.25,
+}
+
 // 怪物看管植物配置
 export const MONSTER_GUARDIAN_CONFIG = {
   guardianDetectionRadius: 135,  // 玩家砍树时怪物的警觉范围
@@ -233,11 +297,12 @@ export const MONSTER_CONFIG = {
     Giant: 1.4,
     Demon: 1.4,
   } as Record<string, number>,
-  // 리스폰 몬스터 스케일링: 경과 일차당 체력/공격력 증가율 (선형)
-  dayScalePerDay: 0.15,
+  // 리스폰/보스 몬스터 티어 스케일 배율 (TIER_CONFIG.scalePerTier와 동일 값을 유지한다)
+  tierScalePerTier: TIER_CONFIG.scalePerTier,
   // 사망 연출 유지 시간 (이후 시체 정리)
   deathAnimMs: 1200,
-  // 보스: bossIntervalDays마다 스폰. 체력/공격력 배율은 모델 강도에 추가 곱산.
+  // 보스(=티어 전환 게이트): bossIntervalDays마다 스폰. 토벌하면 다음 티어로 자동 진행한다.
+  // 체력/공격력 배율은 모델 강도에 추가 곱산. 현재 티어 스케일(TIER_CONFIG)도 함께 적용된다.
   // 20~30초짜리 전투가 되도록 조정 — 너무 높으면 게이지가 움직이지 않는다.
   bossIntervalDays: 5,
   bossHealthMultiplier: 2,
@@ -253,7 +318,7 @@ export const MONSTER_CONFIG = {
   // - fleeHealthRatio: 체력이 이 비율 이하로 깎이면 도주한다 (겁 많은 종족)
   // - ranged: 이 사거리에서 멈춰 투사체를 날린다 (원거리 종족)
   speciesBehavior: {
-    Goblin: { speedMultiplier: 1.25, attackCooldownMultiplier: 0.8, fleeHealthRatio: 0.35 },
+    Goblin: { speedMultiplier: 1.25, attackCooldownMultiplier: 0.8, fleeHealthRatio: 0.25 },
     Skeleton: { speedMultiplier: 0.85, attackDamageMultiplier: 1.5 },
     Zombie: {},
     Yeti: { speedMultiplier: 1.35 },

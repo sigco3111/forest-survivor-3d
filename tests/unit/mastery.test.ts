@@ -176,4 +176,38 @@ describe('toApplication', () => {
 			damageTakenMultiplier: 0.95,
 		})
 	})
+
+	it('returns an empty application when no new mastery threshold was crossed', () => {
+		const bonus = {
+			scanBonus: 10,
+			critChanceBonus: 0.05,
+			critMultiplierBonus: 0.2,
+			attackBonus: 3,
+			damageTakenMultiplier: 0.95,
+		}
+		expect(toApplication(bonus, bonus)).toEqual({})
+	})
+
+	it('returns only the delta from a previous mastery snapshot', () => {
+		const before = {
+			scanBonus: 10,
+			critChanceBonus: 0.05,
+			critMultiplierBonus: 0.2,
+			attackBonus: 3,
+			damageTakenMultiplier: 0.95,
+		}
+		const after = {
+			scanBonus: 12,
+			critChanceBonus: 0.1,
+			critMultiplierBonus: 0.3,
+			attackBonus: 5,
+			damageTakenMultiplier: 0.9,
+		}
+		const app = toApplication(after, before)
+		expect(app.scanRangeBonus).toBe(2)
+		expect(app.critChanceBonus).toBeCloseTo(0.05)
+		expect(app.critMultiplierBonus).toBeCloseTo(0.1)
+		expect(app.attackBonus).toBe(2)
+		expect(app.damageTakenMultiplier).toBeCloseTo(0.9 / 0.95)
+	})
 })

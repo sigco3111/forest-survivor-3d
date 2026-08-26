@@ -1,9 +1,16 @@
 /**
  * 메타 진행: 런 종료 시 통계로 누적 XP를 받고, 누적 레벨이 다음 런의 시작 보너스로 전환된다.
  * localStorage 키 'forest-survivor-meta:v1'에 영구 저장되며 한 번 트랜잭션이다.
+ *
+ * v1 → v2 마이그레이션:
+ * - v1 필드(totalXp/metaLevel/xpIntoLevel/totalRuns/unlockedSpecies)를 보존한다.
+ * - v2에서 추가된 unlockedPerks(영구 해금된 meta perk ID 배열)는 빈 배열로 시작한다.
+ * - 메타 레벨이 이미 perk 임계치를 넘었으면 자동으로 해당 perk를 해금해 retroactive 보너스를 받게 한다.
  */
+import { META_PERK_CONFIG } from '../config'
 
-export const META_SAVE_VERSION = 1
+export const META_SAVE_VERSION = 2
+const META_SAVE_VERSION_V1 = 1
 export const META_SAVE_KEY = 'forest-survivor-meta:v1'
 
 export const META_CONFIG = {
@@ -30,7 +37,7 @@ export type RunSummary = {
 	goldenTrees: number
 }
 
-/** 영구 저장되는 메타 상태. unlocked는 종족 도감의 영구 해금 집합. */
+/** 영구 저장되는 메타 상태. unlockedPerks는 종족 도감과 같은 영구 해금 집합. */
 export type MetaState = {
 	version: number
 	totalXp: number
@@ -38,12 +45,16 @@ export type MetaState = {
 	xpIntoLevel: number
 	totalRuns: number
 	unlockedSpecies: string[]
+	unlockedPerks: string[]
 }
 
 export type StartBonus = {
 	extraHealth: number
 	extraAttack: number
 	extraWood: number
+	extraCritChance: number
+	extraCritMultiplier: number
+	extraCollectRadiusMultiplier: number
 }
 
 /** 빈 메타 상태 (최초 진입 또는 손상된 저장소용). */
@@ -55,6 +66,7 @@ export function emptyMetaState(): MetaState {
 		xpIntoLevel: 0,
 		totalRuns: 0,
 		unlockedSpecies: [],
+		unlockedPerks: [],
 	}
 }
 
@@ -81,6 +93,7 @@ export function applyRunXp(state: MetaState, runXp: number, unlockedSpecies: rea
 			...state,
 			totalRuns: state.totalRuns + 1,
 			unlockedSpecies: mergeSpecies(state.unlockedSpecies, unlockedSpecies),
+			unlockedPerks: mergePerks(state.unlockedPerks, availablePerks(META_PERK_CONFIG, state.metaLevel)),
 		}
 	}
 	let totalXp = state.totalXp + runXp
@@ -97,16 +110,92 @@ export function applyRunXp(state: MetaState, runXp: number, unlockedSpecies: rea
 		xpIntoLevel,
 		totalRuns: state.totalRuns + 1,
 		unlockedSpecies: mergeSpecies(state.unlockedSpecies, unlockedSpecies),
+		unlockedPerks: mergePerks(state.unlockedPerks, availablePerks(META_PERK_CONFIG, metaLevel)),
 	}
 }
 
-/** 메타 레벨을 시작 보너스로 환산한다. */
-export function startBonusFor(metaLevel: number): StartBonus {
+export type MetaPerkDefinition = {
+	id: string
+	unlockMetaLevel: number
+	effects: {
+		startHealth?: number
+		startAttack?: number
+		startWood?: number
+		startCritChance?: number
+		startCritMultiplier?: number
+		startCollectRadiusMultiplier?: number
+	}
+	labelKey: string
+}
+
+export type MetaPerkConfig = {
+	perks: MetaPerkDefinition[]
+	startHealthPerLevelCap: number
+	startAttackPerLevelCap: number
+	startWoodPerFiveLevelsCap: number
+	startCritChanceCap: number
+	startCritMultiplierCap: number
+	startCollectRadiusMultiplierCap: number
+}
+
+/** 메타 레벨에 따라 자동 해금된 perk ID 목록을 반환한다 (retroactive). */
+export function availablePerks(config: MetaPerkConfig, metaLevel: number): string[] {
+	return config.perks
+		.filter(perk => perk.unlockMetaLevel <= metaLevel)
+		.map(perk => perk.id)
+}
+
+/**
+ * 메타 레벨을 시작 보너스로 환산한다. 영구 perk 효과도 합산한다.
+ * cap/scaling으로 폭주를 방지한다.
+ */
+export function startBonusFor(metaLevel: number, config?: MetaPerkConfig): StartBonus {
 	const cfg = META_CONFIG
+	const level = Math.max(0, metaLevel)
+	let extraHealth = Math.min(level * cfg.startHealthPerLevel, config?.startHealthPerLevelCap ?? Number.POSITIVE_INFINITY)
+	let extraAttack = Math.min(level * cfg.startAttackPerLevel, config?.startAttackPerLevelCap ?? Number.POSITIVE_INFINITY)
+	let extraWood = Math.min(
+		Math.floor(level / 5) * cfg.woodPerFiveLevels,
+		config?.startWoodPerFiveLevelsCap ?? Number.POSITIVE_INFINITY,
+	)
+	let extraCritChance = 0
+	let extraCritMultiplier = 0
+	let extraCollectRadiusMultiplier = 1
+
+	if (config) {
+		for (const perk of config.perks) {
+			if (perk.unlockMetaLevel > level) continue
+			const fx = perk.effects
+			if (fx.startHealth) extraHealth += fx.startHealth
+			if (fx.startAttack) extraAttack += fx.startAttack
+			if (fx.startWood) extraWood += fx.startWood
+			if (fx.startCritChance) extraCritChance += fx.startCritChance
+			if (fx.startCritMultiplier) extraCritMultiplier += fx.startCritMultiplier
+			if (fx.startCollectRadiusMultiplier) extraCollectRadiusMultiplier *= fx.startCollectRadiusMultiplier
+		}
+		extraHealth = Math.min(extraHealth, config.startHealthPerLevelCap)
+		extraAttack = Math.min(extraAttack, config.startAttackPerLevelCap)
+		extraWood = Math.min(extraWood, config.startWoodPerFiveLevelsCap)
+		extraCritChance = Math.min(extraCritChance, config.startCritChanceCap)
+		extraCritMultiplier = Math.min(extraCritMultiplier, config.startCritMultiplierCap)
+		extraCollectRadiusMultiplier = Math.min(extraCollectRadiusMultiplier, config.startCollectRadiusMultiplierCap)
+	}
+
 	return {
-		extraHealth: Math.max(0, metaLevel) * cfg.startHealthPerLevel,
-		extraAttack: Math.max(0, metaLevel) * cfg.startAttackPerLevel,
-		extraWood: Math.floor(Math.max(0, metaLevel) / 5) * cfg.woodPerFiveLevels,
+		extraHealth,
+		extraAttack,
+		extraWood,
+		extraCritChance,
+		extraCritMultiplier,
+		extraCollectRadiusMultiplier,
+	}
+}
+
+/** 영구 해금된 perk ID와 메타 레벨에 따라 동기화된 unlockedPerks를 반환한다. */
+export function reconcileUnlockedPerks(state: MetaState, config: MetaPerkConfig): MetaState {
+	return {
+		...state,
+		unlockedPerks: mergePerks(state.unlockedPerks, availablePerks(config, state.metaLevel)),
 	}
 }
 
@@ -117,7 +206,56 @@ function mergeSpecies(existing: readonly string[], additions: readonly string[])
 	return [...set].sort()
 }
 
-/** 저장된 메타 JSON 문자열을 검증해 MetaState 또는 null을 반환한다. */
+function mergePerks(existing: readonly string[], additions: readonly string[]): string[] {
+	if (!additions.length) return [...existing]
+	const set = new Set(existing)
+	for (const perk of additions) set.add(perk)
+	return [...set].sort()
+}
+
+/** v1 payload를 v2 MetaState로 마이그레이션한다. */
+function migrateV1ToV2(raw: Record<string, unknown>): MetaState | null {
+	const requiredNumeric = ['totalXp', 'metaLevel', 'xpIntoLevel', 'totalRuns'] as const
+	for (const field of requiredNumeric) {
+		if (!isFiniteNumber(raw[field])) return null
+		if ((raw[field] as number) < 0) return null
+	}
+	if (!Array.isArray(raw.unlockedSpecies)) return null
+	if (!raw.unlockedSpecies.every(s => typeof s === 'string')) return null
+	return {
+		version: META_SAVE_VERSION,
+		totalXp: raw.totalXp as number,
+		metaLevel: raw.metaLevel as number,
+		xpIntoLevel: raw.xpIntoLevel as number,
+		totalRuns: raw.totalRuns as number,
+		unlockedSpecies: [...(raw.unlockedSpecies as string[])],
+		unlockedPerks: [],
+	}
+}
+
+/** v2 payload를 엄격 검증해 MetaState로 파싱한다. */
+function validateAndParseV2(raw: Record<string, unknown>): MetaState | null {
+	const requiredNumeric = ['totalXp', 'metaLevel', 'xpIntoLevel', 'totalRuns'] as const
+	for (const field of requiredNumeric) {
+		if (!isFiniteNumber(raw[field])) return null
+		if ((raw[field] as number) < 0) return null
+	}
+	if (!Array.isArray(raw.unlockedSpecies)) return null
+	if (!raw.unlockedSpecies.every(s => typeof s === 'string')) return null
+	if (!Array.isArray(raw.unlockedPerks)) return null
+	if (!raw.unlockedPerks.every(s => typeof s === 'string')) return null
+	return {
+		version: META_SAVE_VERSION,
+		totalXp: raw.totalXp as number,
+		metaLevel: raw.metaLevel as number,
+		xpIntoLevel: raw.xpIntoLevel as number,
+		totalRuns: raw.totalRuns as number,
+		unlockedSpecies: [...(raw.unlockedSpecies as string[])],
+		unlockedPerks: [...(raw.unlockedPerks as string[])],
+	}
+}
+
+/** 저장된 메타 JSON 문자열을 검증해 MetaState 또는 null을 반환한다. v1/v2 모두 지원. */
 export function loadMetaState(storage: Pick<Storage, 'getItem'>): MetaState | null {
 	const raw = storage.getItem(META_SAVE_KEY)
 	if (!raw) return null
@@ -127,25 +265,10 @@ export function loadMetaState(storage: Pick<Storage, 'getItem'>): MetaState | nu
 	} catch {
 		return null
 	}
-	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
-	const state = parsed as Record<string, unknown>
-	if (state.version !== META_SAVE_VERSION) return null
-	if (!isFiniteNumber(state.totalXp)) return null
-	if (!isFiniteNumber(state.metaLevel)) return null
-	if (!isFiniteNumber(state.xpIntoLevel)) return null
-	if (!isFiniteNumber(state.totalRuns)) return null
-	if (!Array.isArray(state.unlockedSpecies)) return null
-	if (!state.unlockedSpecies.every(s => typeof s === 'string')) return null
-	if ((state.totalXp as number) < 0 || (state.metaLevel as number) < 0) return null
-	if ((state.xpIntoLevel as number) < 0 || (state.totalRuns as number) < 0) return null
-	return {
-		version: META_SAVE_VERSION,
-		totalXp: state.totalXp as number,
-		metaLevel: state.metaLevel as number,
-		xpIntoLevel: state.xpIntoLevel as number,
-		totalRuns: state.totalRuns as number,
-		unlockedSpecies: [...(state.unlockedSpecies as string[])],
-	}
+	if (!isPlainObject(parsed)) return null
+	if (parsed.version === META_SAVE_VERSION) return validateAndParseV2(parsed)
+	if (parsed.version === META_SAVE_VERSION_V1) return migrateV1ToV2(parsed)
+	return null
 }
 
 /** 메타 상태를 영구 저장한다. */
@@ -160,6 +283,7 @@ export function saveMetaState(
 		xpIntoLevel: state.xpIntoLevel,
 		totalRuns: state.totalRuns,
 		unlockedSpecies: state.unlockedSpecies,
+		unlockedPerks: state.unlockedPerks,
 	}))
 }
 
@@ -171,3 +295,8 @@ export function clearMetaState(storage: Pick<Storage, 'removeItem'>): void {
 function isFiniteNumber(value: unknown): value is number {
 	return typeof value === 'number' && Number.isFinite(value)
 }
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+// META_PERK_CONFIG는 config 모듈에서 런타임으로 import한다.

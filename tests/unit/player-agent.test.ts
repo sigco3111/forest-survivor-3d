@@ -1793,7 +1793,7 @@ describe('player mastery integration', () => {
     agent.applyMasteryBonus({ damageTakenMultiplier: 0.5 })
     expect(agent.damageTakenMultiplier).toBe(0.5)
     agent.applyMasteryBonus({ damageTakenMultiplier: 0.5 })
-    expect(agent.damageTakenMultiplier).toBe(0.25)
+    expect(agent.damageTakenMultiplier).toBe(0.3)
   })
 
   it('applyDamage respects damageTakenMultiplier', () => {
@@ -1979,5 +1979,377 @@ describe('player skill tree integration', () => {
     const agent = createPlayerAgent([0, 0], baseCfg(undefined))
     agent.addExperience(300)
     expect(agent.unlockedSkillNodes).toEqual([])
+  })
+})
+
+describe('player passive tree integration', () => {
+  const baseCfg = (passiveTree?: { nodes: { id: string; trigger: { level?: number; totalKills?: number; speciesKills?: { name: string; count: number }; bossKills?: number; cardChoiceCount?: number; dayReached?: number }; effects: Record<string, number | boolean>; labelKey: string }[] }): PlayerAgentConfig => ({
+    exploreDistance: 50,
+    speed: 20,
+    collectRadius: 5,
+    chopDurationMs: 1_000,
+    attackRangeMeters: 20,
+    attackDamageMs: 100,
+    attackCooldownMs: 500,
+    playerAttackDamage: 10,
+    playerMaxHealth: 100,
+    killHealHealth: 10,
+    regenHealthAmount: 1,
+    regenIntervalMs: 1_000,
+    criticalHealthRatio: 0.25,
+    fleeSafeDistanceMeters: 100,
+    expBase: 100,
+    expGrowth: 1,
+    levelAttackBonus: 0,
+    levelHealthBonus: 0,
+    levelSpeedBonus: 0,
+    huntScanRangePerLevel: 5,
+    slamUnlockLevel: 99,
+    slamCooldownMs: 0,
+    slamRadius: 0,
+    slamDamageMultiplier: 0,
+    furyUnlockLevel: 99,
+    furyCooldownMs: 0,
+    furyDurationMs: 0,
+    furySwingMultiplier: 1,
+    leechUnlockLevel: 99,
+    leechRatio: 0,
+    upgradeCostBase: 999,
+    upgradeCostGrowth: 1,
+    weaponAttackPerTier: 0,
+    weaponPowerPerTier: 0,
+    reserveWood: 0,
+    playerBasePower: 50,
+    powerPerWood: 0,
+    monsterHealthPowerWeight: 1,
+    monsterAttackPowerWeight: 1,
+    huntAggroRangeMultiplier: 1,
+    huntGiveUpRangeMultiplier: 1,
+    worldRadius: 1_000,
+    collisionCheck: () => false,
+    treeResources: () => [],
+    threatSources: () => [],
+    passiveTree,
+  })
+
+  const TREE = {
+    nodes: [
+      { id: 'p.level.5', trigger: { level: 5 }, effects: { damageTakenMultiplier: 0.98 }, labelKey: 'p.level.5' },
+      { id: 'p.kills.5', trigger: { totalKills: 5 }, effects: { bonusFlatDamage: 3 }, labelKey: 'p.kills.5' },
+      { id: 'p.boss.1', trigger: { bossKills: 1 }, effects: { damageTakenMultiplier: 0.5 }, labelKey: 'p.boss.1' },
+      { id: 'p.goblin.3', trigger: { speciesKills: { name: 'Goblin', count: 3 } }, effects: { dodgeChance: 0.05 }, labelKey: 'p.goblin.3' },
+      { id: 'p.day.5', trigger: { dayReached: 5 }, effects: { extraRegenBonus: 1 }, labelKey: 'p.day.5' },
+    ],
+  }
+
+  it('does not unlock anything when passiveTree is not configured', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg(undefined))
+    agent.recordKill('Goblin', false)
+    agent.recordCardChoice()
+    agent.recordLevelReached(5)
+    agent.recordDayReached(5)
+    expect(agent.passiveTreeState.unlockedIds).toEqual([])
+    expect(agent.bonusFlatDamage).toBe(0)
+  })
+
+  it('unlocks level-based passives when addExperience reaches a milestone', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg(TREE))
+    agent.addExperience(500)
+    expect(agent.passiveTreeState.unlockedIds).toContain('p.level.5')
+    expect(agent.damageTakenMultiplier).toBeCloseTo(0.98)
+  })
+
+  it('unlocks nodes via recordKill and applies effects to agent', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg(TREE))
+    for (let i = 0; i < 5; i++) {
+      agent.recordKill('Goblin', false)
+    }
+    expect(agent.passiveTreeState.unlockedIds).toContain('p.kills.5')
+    expect(agent.passiveTreeState.unlockedIds).toContain('p.goblin.3')
+    expect(agent.bonusFlatDamage).toBe(3)
+    expect(agent.dodgeChance).toBeCloseTo(0.05)
+    expect(agent.pendingPassiveUnlocks).toContain('p.kills.5')
+  })
+
+  it('unlocks boss nodes and multiplies damageTakenMultiplier', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg(TREE))
+    agent.recordKill('Giant', true)
+    expect(agent.passiveTreeState.unlockedIds).toContain('p.boss.1')
+    expect(agent.damageTakenMultiplier).toBeCloseTo(0.5)
+  })
+
+  it('recordDayReached does not regress when called with lower day', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg(TREE))
+    agent.recordDayReached(10)
+    expect(agent.passiveTreeState.unlockedIds).toContain('p.day.5')
+    agent.recordDayReached(3)
+    expect(agent.passiveTreeState.progress.dayReached).toBe(10)
+  })
+
+  it('addExperience triggers recordCardChoice which can unlock card nodes (no card nodes here, but ensure no crash)', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg(TREE))
+    agent.addExperience(100)
+    expect(agent.passiveTreeState.progress.cardChoiceCount).toBe(1)
+  })
+
+  it('slam and normal attack both report isCrit when critChance is 1', () => {
+    // slam의 isCrit true 분기 + updateAttacking의 isCrit true 분기를 함께 커버
+    vi.spyOn(Math, 'random').mockReturnValue(0.01) // critChance=1 이면 무조건 crit
+    const onAttackMonster = vi.fn()
+    const threats = [
+      { id: 'a', position: [5, 0], homePosition: [0, 0], activityRadius: 20, speed: 10, attackRadius: 2, health: 50 },
+    ]
+    const cfg = makeConfig({
+      playerAttackDamage: 10,
+      onAttackMonster,
+      threatSources: () => threats,
+      slamUnlockLevel: 1,
+      slamCooldownMs: 100,
+      slamRadius: 100,
+      slamDamageMultiplier: 1,
+      attackDamageMs: 100,
+      attackCooldownMs: 100,
+    })
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.critChance = 1
+    agent.critMultiplier = 2
+    agent.update(0, 0)
+    // slam은 1회, 일반 스윙은 진행 중이지만 윈도우 미도달
+    const calls = onAttackMonster.mock.calls
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls.some(c => c.length === 3 && c[2] === true)).toBe(true)
+  })
+
+  it('does not crash when onAttackMonster is undefined', () => {
+    // config.onAttackMonster 미설정 시 slam/스윙 모두 no-op (false 분기 커버)
+    vi.spyOn(Math, 'random').mockReturnValue(0.99)
+    const threats = [
+      { id: 'a', position: [5, 0], homePosition: [0, 0], activityRadius: 20, speed: 10, attackRadius: 2, health: 50 },
+    ]
+    const cfg = makeConfig({
+      threatSources: () => threats,
+      slamUnlockLevel: 1,
+      slamCooldownMs: 100,
+      slamRadius: 100,
+      slamDamageMultiplier: 1,
+      attackDamageMs: 100,
+      attackCooldownMs: 100,
+    })
+    delete cfg.onAttackMonster
+    const agent = createPlayerAgent([0, 0], cfg)
+    expect(() => agent.update(0, 0)).not.toThrow()
+    // 스윙 윈도우 강제 도달
+    expect(() => agent.update(1, 1_000)).not.toThrow()
+  })
+
+  it('normal attack swing fires with isCrit when critChance is 1', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.01) // critChance=1 이면 무조건 crit
+    const onAttackMonster = vi.fn()
+    const threats = [
+      { id: 'a', position: [5, 0], homePosition: [0, 0], activityRadius: 20, speed: 10, attackRadius: 2, health: 50, attackDamage: 5 },
+    ]
+    const cfg = makeConfig({
+      playerAttackDamage: 10,
+      onAttackMonster,
+      threatSources: () => threats,
+      attackDamageMs: 100,
+      attackCooldownMs: 100,
+    })
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.critChance = 1
+    agent.critMultiplier = 2
+    agent.update(0, 0) // start attacking
+    agent.update(1, 1_000) // swingWindow=200, advance to 1000
+    const calls = onAttackMonster.mock.calls
+    expect(calls.some(c => c.length === 3 && c[2] === true)).toBe(true)
+  })
+})
+
+describe('player crit roll (attackRoll)', () => {
+  const baseCfg = (): PlayerAgentConfig => ({
+    exploreDistance: 50,
+    speed: 20,
+    collectRadius: 5,
+    chopDurationMs: 1_000,
+    attackRangeMeters: 20,
+    attackDamageMs: 100,
+    attackCooldownMs: 500,
+    playerAttackDamage: 10,
+    playerMaxHealth: 100,
+    killHealHealth: 10,
+    regenHealthAmount: 1,
+    regenIntervalMs: 1_000,
+    criticalHealthRatio: 0.25,
+    fleeSafeDistanceMeters: 100,
+    expBase: 100,
+    expGrowth: 1,
+    levelAttackBonus: 0,
+    levelHealthBonus: 0,
+    levelSpeedBonus: 0,
+    huntScanRangePerLevel: 5,
+    slamUnlockLevel: 99,
+    slamCooldownMs: 0,
+    slamRadius: 0,
+    slamDamageMultiplier: 0,
+    furyUnlockLevel: 99,
+    furyCooldownMs: 0,
+    furyDurationMs: 0,
+    furySwingMultiplier: 1,
+    leechUnlockLevel: 99,
+    leechRatio: 0,
+    upgradeCostBase: 999,
+    upgradeCostGrowth: 1,
+    weaponAttackPerTier: 0,
+    weaponPowerPerTier: 0,
+    reserveWood: 0,
+    playerBasePower: 50,
+    powerPerWood: 0,
+    monsterHealthPowerWeight: 1,
+    monsterAttackPowerWeight: 1,
+    huntAggroRangeMultiplier: 1,
+    huntGiveUpRangeMultiplier: 1,
+    worldRadius: 1_000,
+    collisionCheck: () => false,
+    treeResources: () => [],
+    threatSources: () => [],
+  })
+
+  it('returns base + flat damage without crit', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.99) // crit 안 터짐
+    const agent = createPlayerAgent([0, 0], baseCfg())
+    agent.bonusFlatDamage = 4
+    const result = agent.attackRoll(10)
+    expect(result.isCrit).toBe(false)
+    expect(result.finalDamage).toBe(14)
+  })
+
+  it('multiplies damage by critMultiplier on crit', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.01) // crit 터짐
+    const agent = createPlayerAgent([0, 0], baseCfg())
+    agent.critChance = 1
+    agent.critMultiplier = 2
+    agent.bonusFlatDamage = 5
+    const result = agent.attackRoll(10)
+    expect(result.isCrit).toBe(true)
+    // (10 + 5) * 2 = 30
+    expect(result.finalDamage).toBe(30)
+  })
+})
+
+describe('player balance floor/ceiling', () => {
+  const baseCfg = (overrides: Partial<PlayerAgentConfig> = {}): PlayerAgentConfig => ({
+    exploreDistance: 50,
+    speed: 20,
+    collectRadius: 5,
+    chopDurationMs: 1_000,
+    attackRangeMeters: 20,
+    attackDamageMs: 100,
+    attackCooldownMs: 500,
+    playerAttackDamage: 10,
+    playerMaxHealth: 100,
+    killHealHealth: 10,
+    regenHealthAmount: 1,
+    regenIntervalMs: 1_000,
+    criticalHealthRatio: 0.25,
+    fleeSafeDistanceMeters: 100,
+    expBase: 100,
+    expGrowth: 1,
+    levelAttackBonus: 0,
+    levelHealthBonus: 0,
+    levelSpeedBonus: 0,
+    huntScanRangePerLevel: 5,
+    slamUnlockLevel: 99,
+    slamCooldownMs: 0,
+    slamRadius: 0,
+    slamDamageMultiplier: 0,
+    furyUnlockLevel: 99,
+    furyCooldownMs: 0,
+    furyDurationMs: 0,
+    furySwingMultiplier: 1,
+    leechUnlockLevel: 99,
+    leechRatio: 0,
+    upgradeCostBase: 999,
+    upgradeCostGrowth: 1,
+    weaponAttackPerTier: 0,
+    weaponPowerPerTier: 0,
+    reserveWood: 0,
+    playerBasePower: 50,
+    powerPerWood: 0,
+    monsterHealthPowerWeight: 1,
+    monsterAttackPowerWeight: 1,
+    huntAggroRangeMultiplier: 1,
+    huntGiveUpRangeMultiplier: 1,
+    worldRadius: 1_000,
+    collisionCheck: () => false,
+    treeResources: () => [],
+    threatSources: () => [],
+    ...overrides,
+  })
+
+  it('caps crit multiplier and keeps attack rolls bounded', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg({ critMultiplierCeiling: 2 }))
+    agent.critChance = 1
+    agent.critMultiplier = 4
+    expect(agent.attackRoll(10).finalDamage).toBe(20)
+    agent.applyMasteryBonus({ critMultiplierBonus: 1 })
+    expect(agent.critMultiplier).toBe(2)
+  })
+
+  it('applyDamage respects damageTakenFloor on low multipliers', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg({ damageTakenFloor: 0.3 }))
+    agent.damageTakenMultiplier = 0.1
+    agent.applyDamage(100)
+    expect(agent.health).toBe(70) // 100 - round(100 * 0.3) = 70
+  })
+
+  it('allows an explicit damageTakenFloor of zero for opt-in legacy behavior', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg({ damageTakenFloor: 0 }))
+    agent.damageTakenMultiplier = 0.1
+    agent.applyMasteryBonus({ damageTakenMultiplier: 0.1 })
+    expect(agent.damageTakenMultiplier).toBeCloseTo(0.01)
+  })
+
+  it('applyDamage caps dodge chance at dodgeChanceCeiling', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const agent = createPlayerAgent([0, 0], baseCfg({ dodgeChanceCeiling: 0.4 }))
+    agent.dodgeChance = 1
+    // 0.5 > 0.4 → 회피 안 됨
+    expect(agent.applyDamage(20)).toBe(false)
+    expect(agent.health).toBe(80)
+  })
+
+  it('applyMasteryBonus respects damageTakenFloor', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg({ damageTakenFloor: 0.5 }))
+    agent.applyMasteryBonus({ damageTakenMultiplier: 0.1 })
+    expect(agent.damageTakenMultiplier).toBe(0.5)
+  })
+
+  it('upgradeWeapon stops at weaponMaxTier', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg({ weaponMaxTier: 2, upgradeCostBase: 10, upgradeCostGrowth: 1 }))
+    agent.woodCollected = 10_000
+    expect(agent.upgradeWeapon()).toBe(true)
+    expect(agent.weaponTier).toBe(1)
+    expect(agent.upgradeWeapon()).toBe(true)
+    expect(agent.weaponTier).toBe(2)
+    // 그 이후는 false
+    expect(agent.upgradeWeapon()).toBe(false)
+    expect(agent.weaponTier).toBe(2)
+  })
+
+  it('restoreSpeed keeps the agent and next level-up calculation synchronized', () => {
+    const cfg = baseCfg({ weaponMaxTier: 1, upgradeCostBase: 1, upgradeCostGrowth: 1, levelSpeedBonus: 1 })
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.restoreSpeed(18)
+    expect(agent.speed).toBe(18)
+    expect(cfg.speed).toBe(18)
+    agent.addExperience(100)
+    expect(agent.speed).toBe(19)
+  })
+
+  it('weaponMaxTier = 0 disables the cap', () => {
+    const agent = createPlayerAgent([0, 0], baseCfg({ weaponMaxTier: 0, upgradeCostBase: 1, upgradeCostGrowth: 1 }))
+    agent.woodCollected = 100_000
+    for (let i = 0; i < 20; i++) agent.upgradeWeapon()
+    expect(agent.weaponTier).toBe(20)
   })
 })

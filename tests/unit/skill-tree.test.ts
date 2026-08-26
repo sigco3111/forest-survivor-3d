@@ -42,6 +42,8 @@ function emptyTarget(): SkillNodeEffectsTarget {
 		slamCooldownMultiplier: 1,
 		furyDurationMultiplier: 1,
 		bonusFlatDamage: 0,
+		critChance: 0,
+		critMultiplier: 1.5,
 		dodgeChance: 0,
 		damageTakenMultiplier: 1,
 		extraRegenBonus: 0,
@@ -115,7 +117,16 @@ describe('applySkillNodeEffects', () => {
 		expect(target.extraRegenBonus).toBe(2)
 	})
 
-	it('clamps dodgeChance to [0, 1]', () => {
+  it('applies and clamps crit effects', () => {
+    const target = emptyTarget()
+    applySkillNodeEffects(target, { id: 'crit', unlockLevel: 1, effects: { critChanceBonus: 0.6, critMultiplierBonus: 0.4 } })
+    expect(target.critChance).toBe(0.6)
+    expect(target.critMultiplier).toBe(1.9)
+    applySkillNodeEffects(target, { id: 'crit-cap', unlockLevel: 1, effects: { critChanceBonus: 0.6 } })
+    expect(target.critChance).toBe(1)
+  })
+
+  it('clamps dodgeChance to [0, 1]', () => {
 		const target = emptyTarget()
 		const node: SkillNode = { id: 'x', unlockLevel: 1, effects: { dodgeChance: 0.6 } }
 		applySkillNodeEffects(target, node)

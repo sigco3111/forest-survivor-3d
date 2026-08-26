@@ -6,6 +6,7 @@ import {
   createBossMonster,
   createRespawnMonster,
   effectiveDetectionRadius,
+  tierStatScale,
   type MonsterResource,
   type MonsterUpdateContext,
 } from '../../src/game/resources/monsters'
@@ -94,7 +95,7 @@ describe('monster resources', () => {
     expect(resources.some(resource => resource.modelIndex === 6 && resource.modelName === 'Demon')).toBe(true)
   })
 
-  it('createRespawnMonster applies strength multiplier and day scaling', () => {
+  it('createRespawnMonster applies strength multiplier and tier scaling', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5)
     const baseConfig = {
       modelUrls: ['/goblin.glb', '/giant.glb'],
@@ -113,10 +114,10 @@ describe('monster resources', () => {
       modelScale: 6,
       hitStunMs: 700,
       strengthMultipliers: { Goblin: 0.5, Giant: 2 } as Record<string, number>,
-      dayScalePerDay: 0.5,
+      tierScalePerTier: 1.25,
     }
 
-    // 1일차 리스폰: 배율만 적용 (Goblin 0.5 → 체력 50/공격 5). modelNames[2] = 'Goblin'
+    // 티어 1 리스폰: 배율만 적용 (Goblin 0.5 → 체력 50/공격 5). modelNames[2] = 'Goblin'
     const goblin = createRespawnMonster(baseConfig, 'monster-respawn-0', 2, 1)
     expect(goblin.id).toBe('monster-respawn-0')
     expect(goblin.modelName).toBe('Goblin')
@@ -125,15 +126,15 @@ describe('monster resources', () => {
     expect(goblin.attackDamage).toBe(5)
     expect(Math.hypot(...goblin.position)).toBeLessThanOrEqual(400)
 
-    // 3일차 리스폰: 배율 × (1 + 2 × 0.5) = ×2 (Giant 2.0 → 체력 400/공격 40)
+    // 티어 3 리스폰: 배율 × 1.25² = ×1.5625 (Giant 2.0 → 체력 round(312.5)=313/공격 round(31.25)=31)
     const giant = createRespawnMonster(baseConfig, 'monster-respawn-1', 1, 3)
     expect(giant.modelName).toBe('Giant')
-    expect(giant.health).toBe(400)
-    expect(giant.maxHealth).toBe(400)
-    expect(giant.attackDamage).toBe(40)
+    expect(giant.health).toBe(313)
+    expect(giant.maxHealth).toBe(313)
+    expect(giant.attackDamage).toBe(31)
 
-    // dayScalePerDay 미설정 → 스케일링 없음 (?? 0 기본 가지)
-    const { dayScalePerDay: _omitted, ...withoutScaling } = baseConfig
+    // tierScalePerTier 미설정 → 스케일링 없음 (기본 가지)
+    const { tierScalePerTier: _omitted, ...withoutScaling } = baseConfig
     const plain = createRespawnMonster(withoutScaling, 'monster-respawn-2', 2, 5)
     expect(plain.health).toBe(50)
 
@@ -142,6 +143,26 @@ describe('monster resources', () => {
     const fallback = createRespawnMonster(withoutMultipliers, 'monster-respawn-3', 99, 1)
     expect(fallback.modelName).toBe('Demon')
     expect(fallback.health).toBe(100)
+
+    // 티어 0 이하는 스케일 1로 클램프된다 (음수 지수 방지)
+    const floorClamp = createRespawnMonster(baseConfig, 'monster-respawn-floor', 2, 0)
+    expect(floorClamp.health).toBe(50)
+  })
+
+  it('tierStatScale grows geometrically and ignores invalid configs', () => {
+    // 티어 1 = 기준 (배율 1)
+    expect(tierStatScale(1, 1.25)).toBe(1)
+    // 티어 N = scalePerTier^(N-1) — 1.25의 거듭제곱은 부동소수점에서도 정확하다
+    expect(tierStatScale(3, 1.25)).toBe(1.5625)
+    expect(tierStatScale(4, 1.25)).toBeCloseTo(1.953125)
+    // 미설정 → 성장 없음
+    expect(tierStatScale(9, undefined)).toBe(1)
+    // 1 이하 배율 → 성장 꺼짐
+    expect(tierStatScale(9, 1)).toBe(1)
+    expect(tierStatScale(9, 0.8)).toBe(1)
+    // 티어 0/음수 → 클램프
+    expect(tierStatScale(0, 1.25)).toBe(1)
+    expect(tierStatScale(-3, 1.25)).toBe(1)
   })
 
   it('createBossMonster builds a heavily scaled always-aggro boss', () => {
@@ -163,26 +184,30 @@ describe('monster resources', () => {
       modelScale: 6,
       hitStunMs: 700,
       strengthMultipliers: { Giant: 1.4 } as Record<string, number>,
-      dayScalePerDay: 0.5,
+      tierScalePerTier: 1.25,
       bossHealthMultiplier: 2,
       bossDamageMultiplier: 0.8,
     }
 
-    const boss = createBossMonster(config, 'boss-5', 5)
+    // 티어 2 보스: 체력 round(100 × 1.4 × 2 × 1.25) = 350 / 공격 round(10 × 1.4 × 0.8 × 1.25) = 14
+    const boss = createBossMonster(config, 'boss-5', 2)
 
     expect(boss.id).toBe('boss-5')
     expect(boss.modelName).toBe('Giant')
     expect(boss.modelIndex).toBe(1)
     expect(boss.isBoss).toBe(true)
-    // 체력: 100 × 1.4(모델) × 2(보스) × 3(5일차 스케일) = 840
-    expect(boss.maxHealth).toBe(840)
-    expect(boss.health).toBe(840)
-    // 공격력: 10 × 1.4 × 0.8 × 3 = 33.6 → 34
-    expect(boss.attackDamage).toBe(34)
+    expect(boss.maxHealth).toBe(350)
+    expect(boss.health).toBe(350)
+    expect(boss.attackDamage).toBe(14)
     // 시각적으로 크고 (modelScale × 1.6), 활동 반경 전체를 배회
     expect(boss.scale).toBeCloseTo(9.6)
     expect(boss.activityRadius).toBe(170)
     expect(Math.hypot(...boss.position)).toBeLessThanOrEqual(400)
+
+    // 티어가 오른 보스는 기하급수로 강해진다 (티어 3 = ×1.5625)
+    const strongerBoss = createBossMonster(config, 'boss-10', 3)
+    expect(strongerBoss.maxHealth).toBe(438) // round(100 × 2.8 × 1.5625)
+    expect(strongerBoss.attackDamage).toBe(18) // round(10 × 1.12 × 1.5625)
 
     // 보스는 플레이어가 벌목하지 않아도 상시 추격한다
     const agent = createMonsterAgent(makeResource({ isBoss: true, modelName: 'Giant' }))
@@ -697,14 +722,14 @@ describe('monster agent', () => {
   })
 
   it('fleeHealthRatio monsters flee instead of staggering when badly wounded', () => {
-    const resource = makeResource({ health: 100, maxHealth: 100, fleeHealthRatio: 0.35, position: [0, 0] })
+    const resource = makeResource({ health: 100, maxHealth: 100, fleeHealthRatio: 0.25, position: [0, 0] })
     const agent = createMonsterAgent(resource)
     agent.state = 'attack'
 
-    // 체력 100 → 30 (비율 0.3 ≤ 0.35): 경직 대신 도주
-    const hitContext = makeContext({ incomingPlayerHits: [{ id: 'monster', damage: 70 }] })
+    // 체력 100 → 20 (비율 0.2 ≤ 0.25): 경직 대신 도주
+    const hitContext = makeContext({ incomingPlayerHits: [{ id: 'monster', damage: 80 }] })
     agent.update(0, 1_000, hitContext)
-    expect(resource.health).toBe(30)
+    expect(resource.health).toBe(20)
     expect(agent.state).toBe('flee')
     expect(agent.animation).toBe('run')
 
@@ -735,11 +760,11 @@ describe('monster agent', () => {
   })
 
   it('wounded cowards above the ratio still stagger like everyone else', () => {
-    const resource = makeResource({ health: 100, maxHealth: 100, fleeHealthRatio: 0.35, position: [0, 0] })
+    const resource = makeResource({ health: 100, maxHealth: 100, fleeHealthRatio: 0.25, position: [0, 0] })
     const agent = createMonsterAgent(resource)
     agent.state = 'attack'
 
-    // 체력 100 → 83 (비율 0.83 > 0.35): 평범한 경직
+    // 체력 100 → 83 (비율 0.83 > 0.25): 평범한 경직
     const hitContext = makeContext({ incomingPlayerHits: [{ id: 'monster', damage: 17 }] })
     agent.update(0, 1_000, hitContext)
     expect(agent.state).toBe('hit')
@@ -836,7 +861,7 @@ describe('monster agent', () => {
       speciesBehavior: {
         Demon: {
           speedMultiplier: 1.25,
-          fleeHealthRatio: 0.35,
+          fleeHealthRatio: 0.25,
           ranged: { range: 70, projectileSpeed: 110 },
         },
       } as Record<string, import('../../src/game/resources/monsters').SpeciesBehavior>,
@@ -844,12 +869,12 @@ describe('monster agent', () => {
 
     const [spawned] = createMonsterResources(config)
     expect(spawned.modelName).toBe('Demon')
-    expect(spawned.fleeHealthRatio).toBe(0.35)
+    expect(spawned.fleeHealthRatio).toBe(0.25)
     expect(spawned.rangedRange).toBe(70)
 
     vi.spyOn(Math, 'random').mockReturnValue(0.5)
     const respawned = createRespawnMonster(config, 'respawn-1', 0, 1)
-    expect(respawned.fleeHealthRatio).toBe(0.35)
+    expect(respawned.fleeHealthRatio).toBe(0.25)
     expect(respawned.rangedRange).toBe(70)
   })
 })

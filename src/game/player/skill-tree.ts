@@ -12,6 +12,10 @@ export type SkillNodeEffects = {
 	furyDurationMultiplier?: number
 	/** 매 스윙에 가산되는 고정 피해. */
 	bonusFlatDamage?: number
+	/** 카드/패시브로 누적되는 치명타 확률 보너스 (0..1). */
+	critChanceBonus?: number
+	/** 카드/패시브로 누적되는 치명타 배율 보너스. */
+	critMultiplierBonus?: number
 	/** 피격 시 무효 확률 (0..1). */
 	dodgeChance?: number
 	/** 받는 피해 곱셈 (1 미만이면 감소). */
@@ -81,6 +85,12 @@ export function applySkillNodeEffects(agent: SkillNodeEffectsTarget, node: Skill
 	if (effects.bonusFlatDamage !== undefined) {
 		agent.bonusFlatDamage += effects.bonusFlatDamage
 	}
+	if (effects.critChanceBonus !== undefined) {
+		agent.critChance = Math.min(1, agent.critChance + effects.critChanceBonus)
+	}
+	if (effects.critMultiplierBonus !== undefined) {
+		agent.critMultiplier += effects.critMultiplierBonus
+	}
 	if (effects.dodgeChance !== undefined) {
 		agent.dodgeChance = Math.min(1, agent.dodgeChance + effects.dodgeChance)
 	}
@@ -106,6 +116,8 @@ export type SkillNodeEffectsTarget = {
 	slamCooldownMultiplier: number
 	furyDurationMultiplier: number
 	bonusFlatDamage: number
+	critChance: number
+	critMultiplier: number
 	dodgeChance: number
 	damageTakenMultiplier: number
 	extraRegenBonus: number

@@ -136,12 +136,18 @@ export type MasteryApplication = {
 	damageTakenMultiplier?: number
 }
 
-export function toApplication(bonus: MasteryBonus): MasteryApplication {
+export function toApplication(bonus: MasteryBonus, previous: MasteryBonus = emptyMasteryBonus()): MasteryApplication {
 	const out: MasteryApplication = {}
-	if (bonus.critChanceBonus) out.critChanceBonus = bonus.critChanceBonus
-	if (bonus.critMultiplierBonus) out.critMultiplierBonus = bonus.critMultiplierBonus
-	if (bonus.scanBonus) out.scanRangeBonus = bonus.scanBonus
-	if (bonus.attackBonus) out.attackBonus = bonus.attackBonus
-	if (bonus.damageTakenMultiplier !== 1) out.damageTakenMultiplier = bonus.damageTakenMultiplier
+	const scanDelta = bonus.scanBonus - previous.scanBonus
+	const critChanceDelta = bonus.critChanceBonus - previous.critChanceBonus
+	const critMultiplierDelta = bonus.critMultiplierBonus - previous.critMultiplierBonus
+	const attackDelta = bonus.attackBonus - previous.attackBonus
+	if (scanDelta) out.scanRangeBonus = scanDelta
+	if (critChanceDelta) out.critChanceBonus = critChanceDelta
+	if (critMultiplierDelta) out.critMultiplierBonus = critMultiplierDelta
+	if (attackDelta) out.attackBonus = attackDelta
+	if (bonus.damageTakenMultiplier !== previous.damageTakenMultiplier) {
+		out.damageTakenMultiplier = bonus.damageTakenMultiplier / previous.damageTakenMultiplier
+	}
 	return out
 }

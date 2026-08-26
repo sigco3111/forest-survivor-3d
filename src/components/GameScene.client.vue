@@ -16,7 +16,15 @@
 						{{ t('meta.startBonus') }}:
 						+{{ metaSummary.startBonus.extraHealth }} HP,
 						+{{ metaSummary.startBonus.extraAttack }} atk
+						<span v-if="metaSummary.startBonus.extraCritChance > 0">, +{{ Math.round(metaSummary.startBonus.extraCritChance * 100) }}% crit</span>
+						<span v-if="metaSummary.startBonus.extraCritMultiplier > 0">, +{{ metaSummary.startBonus.extraCritMultiplier.toFixed(1) }}× crit power</span>
 						<span v-if="metaSummary.startBonus.extraWood > 0">, +{{ metaSummary.startBonus.extraWood }} 🌲</span>
+					</div>
+					<div v-if="metaSummary.perks.length > 0" class="start-card__meta-perks">
+						<div class="start-card__meta-perks-title">{{ t('meta.perks') }}</div>
+						<div v-for="perk in metaSummary.perks" :key="perk" class="start-card__meta-perk">
+							✓ {{ t(`metaPerk.${perk}`) }}
+						</div>
 					</div>
 				</div>
 				<div class="start-card__presets">
@@ -66,7 +74,11 @@
 			</div>
 		</div>
 		<div class="resource-panel">
-			<div class="resource-panel__day">{{ t('hud.day', { day: currentDay }) }}</div>
+			<div class="resource-panel__day">
+				{{ t('hud.day', { day: currentDay }) }}
+				<span class="resource-panel__tier">{{ t('hud.tier', { tier: currentTier }) }}</span>
+			</div>
+			<div v-if="runStarted && !activeBossId" class="resource-panel__nextboss">{{ nextBossLabel }}</div>
 			<div class="resource-panel__label">{{ t('hud.wood') }}</div>
 			<div class="resource-panel__value">{{ woodCount }}</div>
 			<div class="resource-panel__consumption">{{ t('hud.dailyUse', { count: woodPerDay }) }}</div>
@@ -162,6 +174,12 @@
 				{{ t('hud.mastery.bonus') }} × {{ masterySummary.bonusCount }}
 			</div>
 		</div>
+		<div v-if="passiveSummary.length" class="passive-panel">
+			<div class="passive-panel__title">{{ t('hud.passive.title') }} · {{ passiveSummary.length }}</div>
+			<div v-for="(label, index) in passiveSummary" :key="`${label}-${index}`" class="passive-panel__row">
+				{{ label }}
+			</div>
+		</div>
 		<div v-if="bossBar" class="boss-bar">
 			<div class="boss-bar__name">{{ bossBar.name }} · {{ bossBar.distance }}m</div>
 			<div class="boss-bar__track">
@@ -207,6 +225,7 @@
 				<p v-if="bestRecord" class="game-over-best">{{ t('gameOver.best', { days: bestRecord.days, kills: bestRecord.kills }) }}</p>
 				<p class="game-over-meta">{{ t('meta.xpGained', { xp: metaSummary.lastRunXp }) }}</p>
 				<p v-if="metaSummary.metaLevel > 0" class="game-over-meta">Lv → L{{ metaSummary.metaLevel }}</p>
+				<p class="game-over-autorestart">{{ t('gameOver.autoRestart') }}</p>
 				<button class="game-over-btn" @click="restartGame">{{ t('gameOver.restart') }}</button>
 			</div>
 		</div>
@@ -257,14 +276,16 @@ import {
 	EVENT_CONFIG,
 	LEVEL_UP_CONFIG,
 	MASTERY_CONFIG,
+	META_PERK_CONFIG,
 	MONSTER_CONFIG,
 	MONSTER_GUARDIAN_CONFIG,
+	PASSIVE_TREE_CONFIG,
 	PLAYER_CONFIG,
-	PRESET_CONFIG,
-	PROGRESSION_CONFIG,
-	SKILL_CONFIG,
-	SKILL_TREE_CONFIG,
-	TREE_RESOURCE_CONFIG,
+		PRESET_CONFIG,
+		PROGRESSION_CONFIG,
+		SKILL_CONFIG,
+		SKILL_TREE_CONFIG,
+		TREE_RESOURCE_CONFIG,
 	WEAPON_CONFIG,
 } from '~/config'
 import {
@@ -323,8 +344,8 @@ import {
 	type LightingController,
 } from '~/game/time/lighting'
 import { eventsForDay, type ScheduledEvent } from '~/game/events/scheduler'
-import { createMasteryState, recordKill, toApplication, type MasteryState } from '~/game/player/mastery'
-import { applyRunXp, computeRunXp, emptyMetaState, loadMetaState, saveMetaState, startBonusFor, type MetaState, type StartBonus } from '~/game/meta-progression'
+import { createMasteryState, emptyMasteryBonus, recordKill, toApplication, type MasteryState } from '~/game/player/mastery'
+import { applyRunXp, availablePerks, computeRunXp, emptyMetaState, loadMetaState, META_CONFIG, reconcileUnlockedPerks, saveMetaState, startBonusFor, type MetaState, type StartBonus } from '~/game/meta-progression'
 import { loadRunState, saveRunState, clearRunState, type RunSaveState } from '~/game/save'
 
 defineOptions({
@@ -369,6 +390,16 @@ const choppingHint = computed(() => {
 
 const attackingProgress = ref(0)
 const isInCombat = computed(() => attackingProgress.value > 0)
+
+// ===== 방치형 HUD: 현재 티어 배지 + 다음 보스(티어 전환) 카운트다운 =====
+const nextBossInDays = computed(() => {
+	const interval = MONSTER_CONFIG.bossIntervalDays
+	const offset = currentDay.value % interval
+	return offset === 0 ? 0 : interval - offset
+})
+const nextBossLabel = computed(() => nextBossInDays.value === 0
+	? t('hud.nextBossToday')
+	: t('hud.nextBossIn', { days: nextBossInDays.value }))
 
 // ===== 몬스터 HP바 + 데미지 팝업 오버레이 =====
 type MonsterBarView = { id: string; style: Record<string, string>; percent: number }
@@ -531,7 +562,7 @@ function updatePlayerStatus() {
 		life: Math.max(0, agent.health),
 		lifeMax: agent.maxHealth,
 		wood: Math.max(0, agent.woodCollected),
-		attack: agent.attackDamage,
+		attack: agent.attackDamage + agent.bonusFlatDamage,
 		weaponTier: agent.weaponTier,
 		upgradeCost: agent.nextUpgradeCost(),
 		power: Math.round(power),
@@ -575,7 +606,7 @@ let goldenTreeId: string | null = null
 let goldenTreeBonus = 0
 let masteryState: MasteryState | null = null
 let metaState: MetaState = emptyMetaState()
-const metaSummary = ref<{ totalXp: number; metaLevel: number; xpIntoLevel: number; nextLevelXp: number; totalRuns: number; unlockedSpecies: string[]; lastRunXp: number; startBonus: StartBonus }>({
+const metaSummary = ref<{ totalXp: number; metaLevel: number; xpIntoLevel: number; nextLevelXp: number; totalRuns: number; unlockedSpecies: string[]; lastRunXp: number; startBonus: StartBonus; perks: string[] }>({
 	totalXp: 0,
 	metaLevel: 0,
 	xpIntoLevel: 0,
@@ -583,12 +614,15 @@ const metaSummary = ref<{ totalXp: number; metaLevel: number; xpIntoLevel: numbe
 	totalRuns: 0,
 	unlockedSpecies: [],
 	lastRunXp: 0,
-	startBonus: { extraHealth: 0, extraAttack: 0, extraWood: 0 },
+	startBonus: { extraHealth: 0, extraAttack: 0, extraWood: 0, extraCritChance: 0, extraCritMultiplier: 0, extraCollectRadiusMultiplier: 1 },
+	perks: [],
 })
 let lastRunXpEarned = 0
 let runBuildingsBuilt = 0
 let runGoldenTreesCollected = 0
-let runBossesKilled = 0
+// 방치형 티어: 런은 항상 티어 1에서 시작하고, 보스를 토벌할 때마다 +1된다 (무한 사다리).
+const currentTier = ref(1)
+let runRecorded = false
 
 // 게임 시계: 배속/일시정지를 지원하기 위해 실시간과 분리된 누적 시간 (ms)
 let gameNow = 0
@@ -631,7 +665,9 @@ onMounted(() => {
 function refreshMetaSummary() {
 	const nextLevelXp = metaState.metaLevel === 0
 		? 0
-		: Math.round(200 * Math.pow(1.5, metaState.metaLevel - 1))
+		: META_CONFIG.metaLevelXp(metaState.metaLevel)
+	metaState = reconcileUnlockedPerks(metaState, META_PERK_CONFIG)
+	saveMetaState(localStorage, metaState)
 	metaSummary.value = {
 		totalXp: metaState.totalXp,
 		metaLevel: metaState.metaLevel,
@@ -640,11 +676,13 @@ function refreshMetaSummary() {
 		totalRuns: metaState.totalRuns,
 		unlockedSpecies: [...metaState.unlockedSpecies],
 		lastRunXp: lastRunXpEarned,
-		startBonus: startBonusFor(metaState.metaLevel),
+		startBonus: startBonusFor(metaState.metaLevel, META_PERK_CONFIG),
+		perks: [...availablePerks(META_PERK_CONFIG, metaState.metaLevel)],
 	}
 }
 
 onUnmounted(() => {
+	cancelAutoRestart()
 	disposeScene()
 })
 
@@ -727,19 +765,23 @@ function createScene() {
 	createEnvObjects(scene)
 	createMonsters(scene)
 	createPlayer(scene, selectedPreset.value ?? 'balanced')
-	// 메타 진행: 이전 런에서 누적된 레벨 → 시작 보너스 주입 (HP/atk/wood)
+	// 메타 진행: 이전 런에서 누적된 레벨 → 시작 보너스 주입 (HP/atk/wood/crit/collect)
 	if (playerAgent && !loadedSave.value) {
-		const bonus = startBonusFor(metaState.metaLevel)
+		const bonus = startBonusFor(metaState.metaLevel, META_PERK_CONFIG)
 		playerAgent.maxHealth += bonus.extraHealth
 		playerAgent.health += bonus.extraHealth
 		playerAgent.attackDamage += bonus.extraAttack
 		playerAgent.woodCollected += bonus.extraWood
+		playerAgent.critChance = Math.min(PLAYER_CONFIG.critChanceCeiling, playerAgent.critChance + bonus.extraCritChance)
+		playerAgent.critMultiplier += bonus.extraCritMultiplier
+		playerAgent.collectRadiusMultiplier *= bonus.extraCollectRadiusMultiplier
 		woodCount.value = Math.max(0, playerAgent.woodCollected)
 	}
 	lastRunXpEarned = 0
 	runBuildingsBuilt = 0
 	runGoldenTreesCollected = 0
-	runBossesKilled = 0
+	currentTier.value = 1
+	runRecorded = false
 	window.addEventListener('resize', handleResize)
 	animationFrame = window.requestAnimationFrame(renderFrame)
 }
@@ -941,7 +983,7 @@ function processRespawns() {
 			MONSTER_CONFIG,
 			`monster-respawn-${respawnSeq++}`,
 			task.modelIndex,
-			currentDay.value,
+			currentTier.value,
 		)
 		spawnMonsterVisual(resource, scene)
 	}
@@ -953,7 +995,8 @@ const bossBar = ref<{ name: string; distance: number; health: number; maxHealth:
 
 function spawnBoss(dayNumber: number) {
 	if (!scene) return
-	const resource = createBossMonster(MONSTER_CONFIG, `boss-${dayNumber}`, dayNumber)
+	// 보스는 현재 티어 스케일로 생성된다 — 토벌할 때마다 다음 보스는 자동으로 더 강하다.
+	const resource = createBossMonster(MONSTER_CONFIG, `boss-${dayNumber}`, currentTier.value)
 	spawnMonsterVisual(resource, scene)
 	activeBossId.value = resource.id
 	const message = t('hud.log.bossSpawn')
@@ -1005,19 +1048,14 @@ function plantTreeAtPosition(position: PlanePoint) {
 }
 
 // 玩家攻击怪物回调：스윙 시점 기록 → 다음 updateMonsters에서 FSM이 피해/사망을 처리한다
-function handlePlayerAttack(monsterId: string, damage: number) {
+// agent의 attackRoll이 이미 crit/flat 규칙을 적용해 finalDamage를 계산했으므로 여기서는 popup과 �만 책임진다.
+function handlePlayerAttack(monsterId: string, damage: number, isCrit: boolean = false) {
 	const agent = monsterAgents.find(candidate => candidate.resource.id === monsterId)
 	if (!agent || agent.resource.health <= 0) return
-	// 크리티컬 판정: critChance / critMultiplier는 카드/숙련도로 누적된 값.
-	const isCrit = playerAgent ? Math.random() < playerAgent.critChance : false
-	const baseWithFlat = damage + (playerAgent?.bonusFlatDamage ?? 0)
-	const finalDamage = isCrit && playerAgent
-		? Math.round(baseWithFlat * playerAgent.critMultiplier)
-		: baseWithFlat
-	spawnDamagePopup(agent.position[0], 8, agent.position[1], `-${finalDamage}${isCrit ? '!' : ''}`, 'damage')
-	pendingPlayerHits.push({ id: monsterId, damage: finalDamage })
+	spawnDamagePopup(agent.position[0], 8, agent.position[1], `-${damage}${isCrit ? '!' : ''}`, 'damage')
+	pendingPlayerHits.push({ id: monsterId, damage })
 	// 생명 흡수 스킬: 해준 피해의 일부 회복
-	playerAgent?.applyLifeLeech(finalDamage)
+	playerAgent?.applyLifeLeech(damage)
 }
 
 // 처치 정산: 나무 보상/체력 회복/경험치/리스폰 예약 (몬스터당 정확히 1회)
@@ -1026,28 +1064,37 @@ function settleKill(agent: MonsterAgent) {
 	settledKills.add(agent.resource.id)
 	monsterKills.value += 1
 	dayKills += 1
-	// 보스는 고정 보상 (maxHealth 비례 보상은 일반 몬스터 전용 — 보스 체력이 커서 경제가 깨진다)
+	// 보스는 완료한 티어 비례 보상 (maxHealth 비례 보상은 일반 몬스터 전용 — 보스 체력이 커서 경제가 깨진다)
 	const reward = agent.resource.isBoss
-		? MONSTER_CONFIG.bossRewardWood
+		? MONSTER_CONFIG.bossRewardWood * currentTier.value
 		: Math.max(1, Math.round(agent.resource.maxHealth * 0.3))
 	awardWood(reward)
 	if (agent.resource.isBoss) {
 		logEvent(t('hud.log.bossKill', { count: reward }), 'boss')
 		showToast(t('hud.log.bossKill', { count: reward }))
 		activeBossId.value = null
-		runBossesKilled += 1
+		// 방치형 티어 상승: 보스 토벌 = 다음 티어 자동 진입 (사용자 개입 없음).
+		// 이후 리스폰/보스는 새 티어 스케일로 생성되고, 연출로 전환을 알린다.
+		currentTier.value += 1
+		const tierMsg = t('hud.log.tierUp', { tier: currentTier.value })
+		showToast(tierMsg)
+		logEvent(tierMsg, 'boss')
+		cameraDirector?.triggerBossIntro(gameNow)
 	} else {
 		logEvent(t('hud.log.kill', { model: agent.resource.modelName, count: reward }), 'kill')
 	}
 	// 처치 보상으로 체력 회복 + 경험치 (레벨업 시 공격력/체력/속도 증가)
 	playerAgent?.applyKillHeal()
 	playerAgent?.addExperience(agent.resource.maxHealth)
+	// 패시브 트리: 처치 이벤트를 기록 (보스 여부 함께)
+	playerAgent?.recordKill(agent.resource.modelName, agent.resource.isBoss)
 	// 종족 숙련도: 누적 → 임계치 보너스 자동 적용
 	if (masteryState) {
 		const before = masteryState.activeBonus
 		masteryState = recordKill(masteryState, agent.resource, MASTERY_CONFIG)
 		const after = masteryState.activeBonus
-		const app = toApplication(after)
+		// 전체 누적값을 매번 더하지 말고, 이번 처치에서 새로 발생한 차이만 agent에 적용한다.
+		const app = toApplication(after, before)
 		playerAgent?.applyMasteryBonus(app)
 		// 임계치 신규 발동 시 HUD 알림
 		for (const key of masteryState.lastTriggeredKeys) {
@@ -1139,6 +1186,7 @@ function showLevelUpCard() {
 		effects: playerAgent.lastLevelUpChoice.effects,
 		level: playerAgent.level,
 	}
+	playerAgent.pendingLevelUps = []
 	if (levelUpTimer) clearTimeout(levelUpTimer)
 	levelUpTimer = setTimeout(() => {
 		levelUpCard.value = null
@@ -1189,6 +1237,11 @@ const masterySummary = computed(() => {
 	return { rows, bonusCount }
 })
 
+const passiveSummary = computed(() => {
+	const unlockedIds = playerAgent?.passiveTreeState.unlockedIds ?? []
+	return unlockedIds.map(id => t(`hud.passive['${id}']`))
+})
+
 function pickPreset(preset: PlayerPresetId): void {
 	selectedPreset.value = preset
 	startRun(preset, null)
@@ -1209,6 +1262,8 @@ function startRun(preset: PlayerPresetId, saveState: RunSaveState | null): void 
 	autosaveCurrentRun()
 }
 function recordRun() {
+	if (runRecorded) return
+	runRecorded = true
 	bestRecord.value = saveBestRecord(localStorage, {
 		days: Math.max(0, currentDay.value - 1),
 		kills: monsterKills.value,
@@ -1217,12 +1272,13 @@ function recordRun() {
 	const summary = {
 		days: Math.max(0, currentDay.value - 1),
 		kills: monsterKills.value,
-		bosses: runBossesKilled,
+		bosses: currentTier.value - 1,
 		buildings: runBuildingsBuilt,
 		goldenTrees: runGoldenTreesCollected,
 	}
 	const unlocked = masteryState ? Array.from(masteryState.speciesCounts.keys()) : []
 	metaState = applyRunXp(metaState, computeRunXp(summary), unlocked)
+	metaState = reconcileUnlockedPerks(metaState, META_PERK_CONFIG)
 	lastRunXpEarned = computeRunXp(summary)
 	saveMetaState(localStorage, metaState)
 	refreshMetaSummary()
@@ -1282,12 +1338,16 @@ function createPlayer(targetScene: Scene, preset: PlayerPresetId) {
 		attackDamageMs: PLAYER_CONFIG.attackDamageMs,
 		attackCooldownMs: PLAYER_CONFIG.attackCooldownMs,
 		playerAttackDamage: PLAYER_ATTACK_DAMAGE,
-		onAttackMonster: (monsterId, damage) => handlePlayerAttack(monsterId, damage),
+		onAttackMonster: (monsterId, damage, isCrit) => handlePlayerAttack(monsterId, damage, isCrit),
 		playerMaxHealth: PLAYER_CONFIG.maxHealth,
 		killHealHealth: PLAYER_CONFIG.killHealHealth,
 		regenHealthAmount: PLAYER_CONFIG.regenHealthAmount,
 		regenIntervalMs: PLAYER_CONFIG.regenIntervalMs,
 		criticalHealthRatio: PLAYER_CONFIG.criticalHealthRatio,
+		damageTakenFloor: PLAYER_CONFIG.damageTakenFloor,
+		critChanceCeiling: PLAYER_CONFIG.critChanceCeiling,
+		critMultiplierCeiling: PLAYER_CONFIG.critMultiplierCeiling,
+		dodgeChanceCeiling: PLAYER_CONFIG.dodgeChanceCeiling,
 		fleeSafeDistanceMeters: PLAYER_CONFIG.fleeSafeDistanceMeters,
 		playerBasePower: COMBAT_AGGRESSION_CONFIG.playerBasePower,
 		powerPerWood: COMBAT_AGGRESSION_CONFIG.powerPerWood,
@@ -1319,6 +1379,8 @@ function createPlayer(targetScene: Scene, preset: PlayerPresetId) {
 			: undefined,
 		levelUpAffinity: LEVEL_UP_CONFIG.presetAffinity[preset],
 		skillTree: SKILL_TREE_CONFIG,
+		passiveTree: PASSIVE_TREE_CONFIG,
+		weaponMaxTier: WEAPON_CONFIG.maxTier,
 		treeResources: () => treeResources,
 		// 살아있는 모든 몬스터를 후보로 노출한다:
 		// - hostile=true(chase/attack/hit)인 몬스터만 도망 판정 대상
@@ -1375,20 +1437,17 @@ function renderFrame() {
 	const dayResult = dayCycle?.update(delta * 1000)
 	if (dayResult?.isNewDay) {
 		currentDay.value = dayResult.dayNumber
+		playerAgent?.recordDayReached(dayResult.dayNumber)
 		showDaySummary()
 		logEvent(t('hud.log.day', { day: dayResult.dayNumber }), 'day')
 		// 주기 보스 스폰
-		if (dayResult.dayNumber % MONSTER_CONFIG.bossIntervalDays === 0) {
+		if (activeBossId.value === null && dayResult.dayNumber % MONSTER_CONFIG.bossIntervalDays === 0) {
 			spawnBoss(dayResult.dayNumber)
 		}
 		// 每天扣减木头
 		playerAgent.woodCollected -= DAY_CYCLE_CONFIG.woodConsumedPerDay
 		if (playerAgent.woodCollected <= 0) {
-			playerAgent.playerAlive = false
-			playerAlive.value = false
-			deathCause.value = 'starvation'
-			gameOver.value = true
-			recordRun()
+			endRun('starvation')
 		}
 		// 2·3단계: 오늘의 이벤트를 결정하고 (밤습격 예약 + 황금나무 선정) 다음 야간에 풀어낸다.
 		processDayEvents(dayResult.dayNumber)
@@ -1473,6 +1532,13 @@ function renderFrame() {
 
 	// 3. 更新怪物
 	updateMonsters(delta, now)
+	// 처치/보스/일차 마일스톤 해금 알림
+	for (const nodeId of playerAgent.pendingPassiveUnlocks) {
+		const label = t(`hud.passive['${nodeId}']`)
+		logEvent(t('hud.log.passiveUnlock', { name: label }), 'skill')
+		showToast(t('hud.log.passiveUnlock', { name: label }))
+	}
+	playerAgent.pendingPassiveUnlocks = []
 
 	// 4. 现有系统
 	updateFadingTrees(now)
@@ -1526,10 +1592,7 @@ function updateMonsters(delta: number, now: number) {
 			spawnDamagePopup(playerAgent.position[0], 8, playerAgent.position[1], `-${MONSTER_CONFIG.attackDamage}`, 'hurt')
 			logEvent(t('hud.log.hurt', { count: MONSTER_CONFIG.attackDamage }), 'hurt')
 			if (!playerAgent.playerAlive) {
-				deathCause.value = 'slain'
-				playerAlive.value = false
-				gameOver.value = true
-				recordRun()
+				endRun('slain')
 			}
 			cameraDirector?.triggerHit(gameNow)
 		},
@@ -1871,8 +1934,33 @@ function handleResize() {
 	renderer.setSize(clientWidth, clientHeight)
 }
 
-function restartGame() {
-	// 게임 종료 후 다시 시작: 씬을 폐기하고 시작 오버레이로 돌아간다 (같은/다른 프리셋 모두 재선택 가능).
+// ===== 방치형 무인 순환: 사망 → 요약 표시 → 메타 전환 → 같은 프리셋으로 자동 재시작 =====
+const AUTO_RESTART_DELAY_MS = 4_000
+let autoRestartTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelAutoRestart() {
+	if (autoRestartTimer) {
+		clearTimeout(autoRestartTimer)
+		autoRestartTimer = null
+	}
+}
+
+/** 런 종료 확정: 오버레이 + 기록/메타 전환 + 자동 재시작 예약 (사용자 개입 없음). */
+function endRun(cause: 'starvation' | 'slain') {
+	if (gameOver.value) return
+	playerAgent && (playerAgent.playerAlive = false)
+	deathCause.value = cause
+	playerAlive.value = false
+	gameOver.value = true
+	recordRun()
+	cancelAutoRestart()
+	autoRestartTimer = setTimeout(() => {
+		autoRestartTimer = null
+		autoRestartRun()
+	}, AUTO_RESTART_DELAY_MS)
+}
+
+function resetRunState() {
 	disposeScene()
 	clearRunState(localStorage)
 
@@ -1891,9 +1979,9 @@ function restartGame() {
 	vignetteIntensity.value = 0
 	levelUpCard.value = null
 	if (levelUpTimer) clearTimeout(levelUpTimer)
+	currentTier.value = 1
 
 	loadedSave.value = null
-	selectedPreset.value = null
 	runStarted.value = false
 	bestRecord.value = loadBestRecord(localStorage)
 	// 메타 진행은 영구 — 새 런 시작 시 현재 값을 다시 로드해 시작 오버레이에 반영.
@@ -1901,8 +1989,23 @@ function restartGame() {
 	lastRunXpEarned = 0
 	runBuildingsBuilt = 0
 	runGoldenTreesCollected = 0
-	runBossesKilled = 0
+	runRecorded = false
 	refreshMetaSummary()
+}
+
+/** 수동 재시작 버튼: 씬을 폐기하고 시작 오버레이로 돌아간다 (프리셋 재선택 가능). */
+function restartGame() {
+	cancelAutoRestart()
+	resetRunState()
+	selectedPreset.value = null
+}
+
+/** 무인 재시작: 마지막 프리셋 그대로 새 런을 즉시 시작한다 (메타 perk는 resetRunState에서 재반영). */
+function autoRestartRun() {
+	const preset = selectedPreset.value ?? 'balanced'
+	resetRunState()
+	selectedPreset.value = preset
+	startRun(preset, null)
 }
 
 // ===== 2·3단계: 이벤트 처리 / 자동 건설 / 밤습격 / 자동 저장 / 복원 =====
@@ -1963,7 +2066,7 @@ function maybeSpawnNightRaid() {
 			MONSTER_CONFIG,
 			`raid-${raidDay}-${i}`,
 			modelIndex,
-			raidDay,
+			currentTier.value,
 		)
 		// 습격 몬스터: 자기 활동 반경/탐지 무시하고 충분히 오래 추격한다.
 		resource.activityRadius = WORLD_RADIUS
@@ -2063,6 +2166,42 @@ function autosaveCurrentRun() {
 			segmentIndex: b.segmentIndex,
 			builtDay: b.builtDay,
 		})) : [],
+		critChance: playerAgent.critChance,
+		critMultiplier: playerAgent.critMultiplier,
+		damageTakenMultiplier: playerAgent.damageTakenMultiplier,
+		dodgeChance: playerAgent.dodgeChance,
+		bonusFlatDamage: playerAgent.bonusFlatDamage,
+		slamCooldownMultiplier: playerAgent.slamCooldownMultiplier,
+		furyDurationMultiplier: playerAgent.furyDurationMultiplier,
+		extraRegenBonus: playerAgent.extraRegenBonus,
+		extraScanRangePerLevel: playerAgent.extraScanRangePerLevel,
+		collectRadiusMultiplier: playerAgent.collectRadiusMultiplier,
+		scanRangeMultiplier: playerAgent.scanRangeMultiplier,
+		suppressFlee: playerAgent.suppressFlee,
+		lastSlamAt: playerAgent.lastSlamAt,
+		lastFuryAt: playerAgent.lastFuryAt,
+		furyActiveUntil: playerAgent.furyActiveUntil,
+		regenTimer: playerAgent.regenTimer,
+		mastery: masteryState ? {
+			speciesCounts: Object.fromEntries(masteryState.speciesCounts),
+			bossCount: masteryState.bossCount,
+			triggeredKeys: [...masteryState.triggeredKeys],
+			activeBonus: { ...(masteryState.activeBonus || emptyMasteryBonus()) },
+		} : {
+			speciesCounts: {},
+			bossCount: 0,
+			triggeredKeys: [],
+			activeBonus: { ...emptyMasteryBonus() },
+		},
+		unlockedSkillNodes: [...playerAgent.unlockedSkillNodes],
+		unlockedPassiveNodeIds: [...playerAgent.passiveTreeState.unlockedIds],
+		speciesKills: { ...playerAgent.passiveTreeState.progress.speciesKills },
+		bossKills: playerAgent.passiveTreeState.progress.bossKills,
+		cardChoiceCount: playerAgent.passiveTreeState.progress.cardChoiceCount,
+		dayReached: Math.max(playerAgent.passiveTreeState.progress.dayReached, currentDay.value),
+		levelReached: playerAgent.passiveTreeState.progress.level,
+		position: [playerAgent.position[0], playerAgent.position[1]],
+		gameNowMs: gameNow,
 	})
 }
 
@@ -2073,7 +2212,10 @@ function applySavedState(state: RunSaveState) {
 	dayCycle.state.totalElapsedMs = totalMs
 	dayCycle.state.currentDay = state.day
 	dayCycle.state.dayProgress = (state.elapsedMsInDay) / DAY_CYCLE_CONFIG.realMsPerDay
+	dayCycle.update(0)
 	currentDay.value = state.day
+	// 티어 복원: 보스 처치 수가 곧 (티어 - 1). 세이브의 passiveTree 진행 카운터와 동일 원천.
+	currentTier.value = state.bossKills + 1
 	// 플레이어 능력치/스탯 직접 주입
 	playerAgent.exp = state.exp
 	playerAgent.level = state.level
@@ -2083,7 +2225,48 @@ function applySavedState(state: RunSaveState) {
 	playerAgent.weaponTier = state.weaponTier
 	playerAgent.weaponPower = state.weaponTier * WEAPON_CONFIG.weaponPowerPerTier
 	playerAgent.woodCollected = state.wood
+	playerAgent.restoreSpeed(state.speed)
 	monsterKills.value = state.kills
+	// 누적 전투 스탯
+	playerAgent.critChance = state.critChance
+	playerAgent.critMultiplier = state.critMultiplier
+	playerAgent.damageTakenMultiplier = state.damageTakenMultiplier
+	playerAgent.dodgeChance = state.dodgeChance
+	playerAgent.bonusFlatDamage = state.bonusFlatDamage
+	playerAgent.slamCooldownMultiplier = state.slamCooldownMultiplier
+	playerAgent.furyDurationMultiplier = state.furyDurationMultiplier
+	playerAgent.extraRegenBonus = state.extraRegenBonus
+	playerAgent.extraScanRangePerLevel = state.extraScanRangePerLevel
+	playerAgent.collectRadiusMultiplier = state.collectRadiusMultiplier
+	playerAgent.scanRangeMultiplier = state.scanRangeMultiplier
+	playerAgent.suppressFlee = state.suppressFlee
+	// 타이머는 게임 시간(gameNow) 기준이므로 wall-clock(savedAtMs)과 섞지 않는다.
+	playerAgent.lastSlamAt = state.lastSlamAt
+	playerAgent.lastFuryAt = state.lastFuryAt
+	playerAgent.furyActiveUntil = state.furyActiveUntil
+	playerAgent.regenTimer = state.regenTimer
+	gameNow = state.gameNowMs
+	// 패시브 트리 진행
+	playerAgent.passiveTreeState = {
+		unlockedIds: [...state.unlockedPassiveNodeIds],
+		pendingUnlocks: [],
+		progress: {
+			level: state.levelReached,
+			totalKills: state.kills,
+			speciesKills: { ...state.speciesKills },
+			bossKills: state.bossKills,
+			cardChoiceCount: state.cardChoiceCount,
+			dayReached: state.dayReached,
+		},
+	}
+	masteryState = {
+		speciesCounts: new Map(Object.entries(state.mastery.speciesCounts)),
+		bossCount: state.mastery.bossCount,
+		activeBonus: { ...state.mastery.activeBonus },
+		triggeredKeys: new Set(state.mastery.triggeredKeys),
+		lastTriggeredKeys: [],
+	}
+	playerAgent.position = [state.position[0], state.position[1]]
 	// 저장된 건축을 복원하고 시각화
 	buildingManager.restore(state.buildings.map(b => ({
 		type: b.type,
@@ -2357,6 +2540,24 @@ function disposeScene() {
 	color: #ffc857;
 	margin-bottom: 8px;
 	text-shadow: 0 0 12px rgba(255, 200, 87, 0.4);
+}
+
+.resource-panel__tier {
+	display: inline-block;
+	margin-left: 6px;
+	padding: 1px 7px;
+	border: 1px solid rgba(255, 110, 199, 0.55);
+	border-radius: 999px;
+	font-size: 12px;
+	color: #ff6ec7;
+	text-shadow: 0 0 10px rgba(255, 110, 199, 0.5);
+}
+
+.resource-panel__nextboss {
+	font-size: 11px;
+	letter-spacing: 0.06em;
+	color: rgba(255, 178, 224, 0.85);
+	margin-bottom: 6px;
 }
 
 .resource-panel__label,
@@ -2693,6 +2894,38 @@ function disposeScene() {
 	font-size: 10px;
 	font-weight: 700;
 	color: #35f4ff;
+}
+
+.passive-panel {
+	position: absolute;
+	top: 545px;
+	left: 20px;
+	z-index: 2;
+	width: 180px;
+	max-height: 190px;
+	overflow: auto;
+	padding: 10px 12px;
+	border: 1px solid rgba(53, 244, 255, 0.3);
+	border-radius: 12px;
+	background: rgba(3, 12, 24, 0.68);
+	color: #dffcff;
+	font-family: ui-sans-serif, system-ui, sans-serif;
+	box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+	backdrop-filter: blur(12px);
+}
+
+.passive-panel__title {
+	margin-bottom: 6px;
+	font-size: 11px;
+	font-weight: 700;
+	color: #35f4ff;
+}
+
+.passive-panel__row {
+	padding: 3px 0;
+	border-top: 1px solid rgba(53, 244, 255, 0.12);
+	font-size: 10px;
+	line-height: 1.35;
 }
 
 .minimap-toggle {
@@ -3124,6 +3357,18 @@ function disposeScene() {
 .game-over-meta {
 	color: #35f4ff !important;
 	font-weight: 600;
+}
+
+.game-over-autorestart {
+	color: rgba(223, 252, 255, 0.72) !important;
+	font-size: 13px;
+	letter-spacing: 0.04em;
+	animation: auto-restart-pulse 2s ease-in-out infinite;
+}
+
+@keyframes auto-restart-pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.45; }
 }
 
 @media (max-width: 600px) {

@@ -3,13 +3,17 @@ import { describe, expect, it } from 'vitest'
 import {
 	META_CONFIG,
 	META_SAVE_KEY,
+	META_SAVE_VERSION,
 	applyRunXp,
+	availablePerks,
 	clearMetaState,
 	computeRunXp,
 	emptyMetaState,
 	loadMetaState,
+	reconcileUnlockedPerks,
 	saveMetaState,
 	startBonusFor,
+	type MetaPerkConfig,
 	type MetaState,
 } from '../../src/game/meta-progression'
 
@@ -23,12 +27,13 @@ class MemoryStorage implements Pick<Storage, 'getItem' | 'setItem' | 'removeItem
 describe('emptyMetaState', () => {
 	it('returns identity state', () => {
 		const s = emptyMetaState()
-		expect(s.version).toBe(1)
+		expect(s.version).toBe(META_SAVE_VERSION)
 		expect(s.totalXp).toBe(0)
 		expect(s.metaLevel).toBe(0)
 		expect(s.xpIntoLevel).toBe(0)
 		expect(s.totalRuns).toBe(0)
 		expect(s.unlockedSpecies).toEqual([])
+		expect(s.unlockedPerks).toEqual([])
 	})
 })
 
@@ -106,7 +111,14 @@ describe('applyRunXp', () => {
 
 describe('startBonusFor', () => {
 	it('returns zero bonuses at meta level 0', () => {
-		expect(startBonusFor(0)).toEqual({ extraHealth: 0, extraAttack: 0, extraWood: 0 })
+		expect(startBonusFor(0)).toEqual({
+			extraHealth: 0,
+			extraAttack: 0,
+			extraWood: 0,
+			extraCritChance: 0,
+			extraCritMultiplier: 0,
+			extraCollectRadiusMultiplier: 1,
+		})
 	})
 
 	it('scales bonuses with meta level', () => {
@@ -114,6 +126,9 @@ describe('startBonusFor', () => {
 			extraHealth: 25,
 			extraAttack: 2.5,
 			extraWood: 3, // floor(5/5)*3
+			extraCritChance: 0,
+			extraCritMultiplier: 0,
+			extraCollectRadiusMultiplier: 1,
 		})
 	})
 
@@ -125,7 +140,14 @@ describe('startBonusFor', () => {
 	})
 
 	it('clamps negative meta level to zero', () => {
-		expect(startBonusFor(-5)).toEqual({ extraHealth: 0, extraAttack: 0, extraWood: 0 })
+		expect(startBonusFor(-5)).toEqual({
+			extraHealth: 0,
+			extraAttack: 0,
+			extraWood: 0,
+			extraCritChance: 0,
+			extraCritMultiplier: 0,
+			extraCollectRadiusMultiplier: 1,
+		})
 	})
 })
 
@@ -133,12 +155,13 @@ describe('save/load round trip', () => {
 	it('saves and loads an equivalent state', () => {
 		const storage = new MemoryStorage()
 		const state: MetaState = {
-			version: 1,
+			version: META_SAVE_VERSION,
 			totalXp: 1500,
 			metaLevel: 4,
 			xpIntoLevel: 200,
 			totalRuns: 7,
 			unlockedSpecies: ['Goblin', 'Skeleton'],
+			unlockedPerks: ['vitality'],
 		}
 		saveMetaState(storage, state)
 		expect(loadMetaState(storage)).toEqual(state)
@@ -156,61 +179,67 @@ describe('save/load round trip', () => {
 
 	it('returns null when version is wrong', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 99, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [] }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 99, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [], unlockedPerks: [] }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
 	it('returns null when any field is non-numeric', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 1, totalXp: 'oops', metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [] }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 'oops', metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [], unlockedPerks: [] }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
 	it('returns null when metaLevel is non-numeric', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 1, totalXp: 0, metaLevel: 'x', xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [] }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 0, metaLevel: 'x', xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [], unlockedPerks: [] }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
 	it('returns null when xpIntoLevel is non-numeric', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 1, totalXp: 0, metaLevel: 0, xpIntoLevel: 'x', totalRuns: 0, unlockedSpecies: [] }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 0, metaLevel: 0, xpIntoLevel: 'x', totalRuns: 0, unlockedSpecies: [], unlockedPerks: [] }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
 	it('returns null when totalRuns is non-numeric', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 1, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: 'x', unlockedSpecies: [] }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: 'x', unlockedSpecies: [], unlockedPerks: [] }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
 	it('returns null when xpIntoLevel is negative', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 1, totalXp: 0, metaLevel: 0, xpIntoLevel: -1, totalRuns: 0, unlockedSpecies: [] }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 0, metaLevel: 0, xpIntoLevel: -1, totalRuns: 0, unlockedSpecies: [], unlockedPerks: [] }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
 	it('returns null when totalRuns is negative', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 1, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: -1, unlockedSpecies: [] }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: -1, unlockedSpecies: [], unlockedPerks: [] }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
 	it('returns null when metaLevel is negative', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 1, totalXp: 0, metaLevel: -1, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [] }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 0, metaLevel: -1, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [], unlockedPerks: [] }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
 	it('returns null when unlockedSpecies contains non-strings', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 1, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [1, 2] }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [1, 2], unlockedPerks: [] }))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+
+	it('returns null when unlockedPerks contains non-strings', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [], unlockedPerks: [1, 2] }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
 	it('returns null when numeric fields are negative', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 1, totalXp: -1, metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [] }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: -1, metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [], unlockedPerks: [] }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
@@ -222,7 +251,13 @@ describe('save/load round trip', () => {
 
 	it('returns null when unlockedSpecies is not an array', () => {
 		const storage = new MemoryStorage()
-		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: 1, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: 'oops' }))
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: 'oops', unlockedPerks: [] }))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+
+	it('returns null when unlockedPerks is not an array', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ version: META_SAVE_VERSION, totalXp: 0, metaLevel: 0, xpIntoLevel: 0, totalRuns: 0, unlockedSpecies: [], unlockedPerks: 'oops' }))
 		expect(loadMetaState(storage)).toBeNull()
 	})
 
@@ -233,4 +268,162 @@ describe('save/load round trip', () => {
 		clearMetaState(storage)
 		expect(storage.getItem(META_SAVE_KEY)).toBeNull()
 	})
+})
+
+describe('v1 → v2 migration', () => {
+	it('preserves v1 fields and adds unlockedPerks default', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({
+			version: 1,
+			totalXp: 1500,
+			metaLevel: 4,
+			xpIntoLevel: 200,
+			totalRuns: 7,
+			unlockedSpecies: ['Goblin', 'Skeleton'],
+		}))
+		const loaded = loadMetaState(storage)
+		expect(loaded).toEqual({
+			version: META_SAVE_VERSION,
+			totalXp: 1500,
+			metaLevel: 4,
+			xpIntoLevel: 200,
+			totalRuns: 7,
+			unlockedSpecies: ['Goblin', 'Skeleton'],
+			unlockedPerks: [],
+		})
+	})
+
+	it('rejects v1 with invalid fields', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({
+			version: 1,
+			totalXp: 'oops',
+			metaLevel: 0,
+			xpIntoLevel: 0,
+			totalRuns: 0,
+			unlockedSpecies: [],
+		}))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+
+	it('rejects v1 with negative numeric field', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({
+			version: 1,
+			totalXp: 0,
+			metaLevel: -1,
+			xpIntoLevel: 0,
+			totalRuns: 0,
+			unlockedSpecies: [],
+		}))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+
+	it('rejects v1 with non-array unlockedSpecies', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({
+			version: 1,
+			totalXp: 0,
+			metaLevel: 0,
+			xpIntoLevel: 0,
+			totalRuns: 0,
+			unlockedSpecies: 'oops',
+		}))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+
+	it('rejects v1 with non-string unlockedSpecies entries', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({
+			version: 1,
+			totalXp: 0,
+			metaLevel: 0,
+			xpIntoLevel: 0,
+			totalRuns: 0,
+			unlockedSpecies: [1, 2],
+		}))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+})
+
+describe('meta perks', () => {
+	const PERK_CONFIG: MetaPerkConfig = {
+		perks: [
+			{ id: 'vitality', unlockMetaLevel: 2, effects: { startHealth: 20 }, labelKey: 'metaPerk.vitality' },
+			{ id: 'edge', unlockMetaLevel: 5, effects: { startAttack: 2 }, labelKey: 'metaPerk.edge' },
+			{ id: 'stockpile', unlockMetaLevel: 8, effects: { startWood: 10 }, labelKey: 'metaPerk.stockpile' },
+			{ id: 'crit-mastery', unlockMetaLevel: 10, effects: { startCritChance: 0.05, startCritMultiplier: 0.2 }, labelKey: 'metaPerk.crit-mastery' },
+			{ id: 'magnet', unlockMetaLevel: 12, effects: { startCollectRadiusMultiplier: 1.1 }, labelKey: 'metaPerk.magnet' },
+		],
+		startHealthPerLevelCap: 60,
+		startAttackPerLevelCap: 8,
+		startWoodPerFiveLevelsCap: 30,
+		startCritChanceCap: 0.2,
+		startCritMultiplierCap: 0.5,
+		startCollectRadiusMultiplierCap: 1.5,
+	}
+
+	it('availablePerks lists perks whose threshold is at or below meta level', () => {
+		expect(availablePerks(PERK_CONFIG, 0)).toEqual([])
+		expect(availablePerks(PERK_CONFIG, 2)).toEqual(['vitality'])
+		expect(availablePerks(PERK_CONFIG, 6)).toEqual(['vitality', 'edge'])
+		expect(availablePerks(PERK_CONFIG, 13)).toEqual([
+			'vitality', 'edge', 'stockpile', 'crit-mastery', 'magnet',
+		])
+	})
+
+	it('startBonusFor applies perk effects and caps them', () => {
+		// 메타 레벨 13: vitality + edge + stockpile + magnet + crit-mastery 전부 활성
+		const bonus = startBonusFor(13, PERK_CONFIG)
+		// health: 13*5 + 20 = 85, cap 60 → 60
+		expect(bonus.extraHealth).toBe(60)
+		// attack: 13*0.5 + 2 = 8.5, cap 8 → 8
+		expect(bonus.extraAttack).toBe(8)
+		// wood: floor(13/5)*3 + 10 = 6 + 10 = 16, cap 30 → 16
+		expect(bonus.extraWood).toBe(16)
+		expect(bonus.extraCritChance).toBe(0.05)
+		expect(bonus.extraCritMultiplier).toBe(0.2)
+		expect(bonus.extraCollectRadiusMultiplier).toBeCloseTo(1.1)
+	})
+
+	it('startBonusFor skips perks above meta level', () => {
+		// 메타 레벨 1: vitality(threshold 2)는 아직 해금 안 됨 → 적용 없음
+		const bonus = startBonusFor(1, PERK_CONFIG)
+		expect(bonus.extraHealth).toBe(5) // 1 * 5
+		expect(bonus.extraAttack).toBe(0.5) // 1 * 0.5
+		expect(bonus.extraCritChance).toBe(0)
+		expect(bonus.extraCollectRadiusMultiplier).toBe(1)
+	})
+
+	it('startBonusFor without config has no perk effects', () => {
+		const bonus = startBonusFor(12)
+		expect(bonus.extraHealth).toBe(60) // 12 * 5
+		expect(bonus.extraAttack).toBe(6) // 12 * 0.5
+		expect(bonus.extraWood).toBe(6)
+		expect(bonus.extraCritChance).toBe(0)
+	})
+
+	it('reconcileUnlockedPerks retroactively adds perks when meta level rises', () => {
+		const state: MetaState = { ...emptyMetaState(), metaLevel: 4 }
+		const next = reconcileUnlockedPerks(state, PERK_CONFIG)
+		expect(next.unlockedPerks).toEqual(['vitality'])
+		const state2 = { ...next, metaLevel: 13 }
+		const next2 = reconcileUnlockedPerks(state2, PERK_CONFIG)
+		// reconcileUnlockedPerks는 정렬된 목록을 돌려준다
+		expect(next2.unlockedPerks).toEqual([
+			'crit-mastery', 'edge', 'magnet', 'stockpile', 'vitality',
+		])
+	})
+
+	it('reconcileUnlockedPerks preserves manually unlocked perks even if meta level drops', () => {
+		const state: MetaState = { ...emptyMetaState(), metaLevel: 0, unlockedPerks: ['edge'] }
+		const next = reconcileUnlockedPerks(state, PERK_CONFIG)
+		expect(next.unlockedPerks).toEqual(['edge'])
+	})
+
+  it('applyRunXp keeps unlockedPerks intact and adds newly reached perks', () => {
+    const initial: MetaState = { ...emptyMetaState(), metaLevel: 5, unlockedPerks: ['vitality'] }
+    const next = applyRunXp(initial, 1000, [])
+    expect(next.unlockedPerks).toEqual(['edge', 'vitality'])
+  })
 })

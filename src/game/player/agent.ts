@@ -5,6 +5,15 @@ import {
 	type TreeResource,
 } from '../resources/trees'
 import { applyCardEffects, rollLevelUp, type LevelUpPool, type PresetAffinity } from './level-up-cards'
+import {
+	createPassiveTreeState,
+	recordPassiveCardChoice,
+	recordPassiveDayReached,
+	recordPassiveLevelReached,
+	recordPassiveKill,
+	type PassiveTreeConfig,
+	type PassiveTreeState,
+} from './passive-tree'
 import { applySkillNodeEffects, findNewUnlocks } from './skill-tree'
 
 export type PlayerAgentState = 'exploring' | 'approaching' | 'chopping' | 'fleeing' | 'attacking' | 'hunting'
@@ -75,7 +84,7 @@ export type PlayerAgentConfig = {
 	attackDamageMs: number        // 攻击挥砍动画耗时（毫秒）
 	attackCooldownMs: number      // 攻击之间的冷却（毫秒）
 	playerAttackDamage: number    // 单次攻击伤害
-	onAttackMonster?: (monsterId: string, damage: number) => void
+	onAttackMonster?: (monsterId: string, damage: number, isCrit?: boolean) => void
 	playerMaxHealth: number           // 플레이어 최대 체력
 	killHealHealth: number            // 몬스터 처치 시 체력 회복량
 	regenHealthAmount: number         // 비전투 중 체력 회복량 (틱당)
@@ -103,12 +112,21 @@ export type PlayerAgentConfig = {
 	weaponAttackPerTier: number       // 무기 티어당 공격력 증가
 	weaponPowerPerTier: number        // 무기 티어당 전투력 증가
 	reserveWood: number               // 강화 후에도 유지할 비상 나무
+	weaponMaxTier?: number            // 무기 강화 최대 티어 (0 = 무제한, 기본 0)
 	playerBasePower: number           // 플레이어 기본 전투력
 	powerPerWood: number              // 나무 1개당 전투력 증가량
 	monsterHealthPowerWeight: number  // 몬스터 체력 → 위협 전투력 가중치
 	monsterAttackPowerWeight: number  // 몬스터 공격력 → 위협 전투력 가중치
 	huntAggroRangeMultiplier: number  // 선제공격 스캔 범위 배율 (attackRangeMeters × 배율)
 	huntGiveUpRangeMultiplier: number // 추격 포기 범위 배율 (attackRangeMeters × 배율)
+	/** 받는 피해 배율의 하한 (0.3 등). 기본 0.3. */
+	damageTakenFloor?: number
+	/** 크리티컬 확률 상한 (기본 1.0 = 무제한). */
+	critChanceCeiling?: number
+	/** 크리티컬 배율 상한 (기본 5.0). */
+	critMultiplierCeiling?: number
+	/** 회피 확률 상한 (기본 0.75). */
+	dodgeChanceCeiling?: number
 	presetWeights?: PresetWeights     // 성향 프리셋 가중치 (미지정 = 균형)
 	/** 카드 기반 레벨업 풀 (미지정 시 기존 levelXxxBonus 자동 적용) */
 	levelUpPool?: LevelUpPool
@@ -116,6 +134,8 @@ export type PlayerAgentConfig = {
 	levelUpAffinity?: PresetAffinity
 	/** 스킬트리: 레벨 임계 도달 시 노드를 자동 해금한다 (선택) */
 	skillTree?: import('./skill-tree').SkillTreeConfig
+	/** 패시브 트리: 처치/보스/카드/일차 마일스톤으로 노드를 자동 해금한다 (선택) */
+	passiveTree?: PassiveTreeConfig
 	worldRadius: number           // 世界半径
 	collisionCheck: (position: PlanePoint) => boolean
 	treeResources: () => TreeResource[]
@@ -189,6 +209,12 @@ export type PlayerAgent = {
 	pendingLevelUps: { chosenId: string; effects: Record<string, number> }[]
 	/** 마지막으로 처리한 레벨업 결과 (마지막 카드 한 장 — HUD 단일 카드용). */
 	lastLevelUpChoice: { id: string; effects: Record<string, number> } | null
+	/** 패시브 트리 누적 진행 + 해금 ID (런 한정 영구). */
+	passiveTreeState: PassiveTreeState
+	/** 이번 호출(recordPassiveKill/Card/Day)에 해금된 패시브 노드 (HUD 알림 후 비움). */
+	pendingPassiveUnlocks: string[]
+	/** 무기 강화 최대 티어 (config로 주입, 0 = 무제한). */
+	weaponMaxTier: number
 
 	update(delta: number, now: number): void
 	/** 피해를 입힌다. 회피 시 true를 반환하고 피해는 적용되지 않는다. 체력이 0이 되면 playerAlive = false (사망). */
@@ -211,6 +237,21 @@ export type PlayerAgent = {
 		attackBonus?: number
 		damageTakenMultiplier?: number
 	}): void
+	/** 처치 이벤트를 패시브 트리에 기록한다 (일반 몬스터 / 보스 모두 같은 경로). */
+	recordKill(speciesName: string, isBoss?: boolean): void
+	/** 레벨업 카드 선택 이벤트를 패시브 트리에 기록한다. */
+	recordCardChoice(): void
+	/** 도달한 플레이어 레벨을 패시브 트리에 기록한다. */
+	recordLevelReached(level: number): void
+	/** 도달 일차 이벤트를 패시브 트리에 기록한다 (이미 도달한 일차는 무시한다). */
+	recordDayReached(day: number): void
+	/**
+	 * 최종 피해 규칙을 한 곳에서 계산한다: critChance 확률로 critMultiplier 적용, 항상 bonusFlatDamage 가산.
+	 * agent 내부에서만 호출되며, slam/일반 공격 모두 동일한 결과 규칙을 따른다.
+	 */
+	attackRoll(baseDamage: number): { isCrit: boolean; finalDamage: number }
+	/** 저장된 이동 속도를 agent와 다음 level-up 계산에 동일하게 복원한다. */
+	restoreSpeed(speed: number): void
 }
 
 const AREA_FAILURE_LIMIT = 2
@@ -239,6 +280,11 @@ export function createPlayerAgent(
 	startPosition: PlanePoint,
 	config: PlayerAgentConfig,
 ): PlayerAgent {
+	// 클램프 기본값: 방어 피해 floor=0.3, 명시적으로 설정한 상한만 추가 적용된다.
+	const damageTakenFloor = config.damageTakenFloor ?? 0.3
+	const critChanceCeiling = config.critChanceCeiling ?? 1
+	const critMultiplierCeiling = config.critMultiplierCeiling ?? 5
+	const dodgeChanceCeiling = config.dodgeChanceCeiling ?? 1
 	return {
 		state: 'exploring',
 		position: [...startPosition],
@@ -281,14 +327,19 @@ export function createPlayerAgent(
 		pendingSkillUnlocks: [],
 		pendingLevelUps: [],
 		lastLevelUpChoice: null,
+		passiveTreeState: createPassiveTreeState(),
+		pendingPassiveUnlocks: [],
+		weaponMaxTier: config.weaponMaxTier ?? 0,
 		failedAreaAttempt: null,
 
 		applyDamage(amount: number): boolean {
 			// 회피 판정: dodgeChance로 Math.random 임계 (씬 레이어가 아닌 모델 내 결정성 보존 목적)
-			if (this.dodgeChance > 0 && Math.random() < this.dodgeChance) {
+			const dodgeCeiling = Math.min(this.dodgeChance, dodgeChanceCeiling)
+			if (dodgeCeiling > 0 && Math.random() < dodgeCeiling) {
 				return true
 			}
-			const reduced = Math.round(amount * this.damageTakenMultiplier)
+			const effectiveDamageMultiplier = Math.max(damageTakenFloor, this.damageTakenMultiplier)
+			const reduced = Math.round(amount * effectiveDamageMultiplier)
 			this.health = Math.max(0, this.health - reduced)
 			if (this.health <= 0) this.playerAlive = false
 			return false
@@ -296,6 +347,22 @@ export function createPlayerAgent(
 
 		applyKillHeal() {
 			this.health = Math.min(this.maxHealth, this.health + config.killHealHealth)
+		},
+
+		restoreSpeed(speed: number) {
+			this.speed = speed
+			config.speed = speed
+		},
+
+		attackRoll(baseDamage: number) {
+			const effectiveCritChance = Math.min(this.critChance, critChanceCeiling)
+			const isCrit = effectiveCritChance > 0 && Math.random() < effectiveCritChance
+			const effectiveCritMultiplier = Math.min(this.critMultiplier, critMultiplierCeiling)
+			const baseWithFlat = baseDamage + this.bonusFlatDamage
+			const finalDamage = isCrit
+				? Math.round(baseWithFlat * effectiveCritMultiplier)
+				: baseWithFlat
+			return { isCrit, finalDamage }
 		},
 
 		addExperience(amount: number) {
@@ -307,6 +374,7 @@ export function createPlayerAgent(
 				const prevLevel = this.level
 				this.exp -= threshold
 				this.level += 1
+				this.recordLevelReached(this.level)
 
 				if (pool) {
 					// 카드 풀 기반: 매 레벨업마다 후보 3장 추출 → 친화도 점수 최대 카드를 자동 채택 → 효과 누적.
@@ -334,6 +402,8 @@ export function createPlayerAgent(
 					if (applied.critChanceBonus) this.critChance = Math.min(1, this.critChance + applied.critChanceBonus)
 					if (applied.regenBonus) this.extraRegenBonus += applied.regenBonus
 					if (applied.scanBonus) this.extraScanRangePerLevel += applied.scanBonus
+					// 카드 선택 이벤트를 패시브 트리에 기록한다.
+					this.recordCardChoice()
 				} else {
 					// 풀 미설정 시: 기존 동작 (성향 가중치가 곱해진 고정 보너스)
 					const healthBonus = Math.round(config.levelHealthBonus * weights.healthWeight)
@@ -343,6 +413,8 @@ export function createPlayerAgent(
 					const speedDelta = config.levelSpeedBonus * weights.speedWeight
 					config.speed += speedDelta
 					this.speed += speedDelta
+					// 풀 없이도 카드를 한 장 고른 것으로 간주해 패시브 트리를 진행시킨다.
+					this.recordCardChoice()
 				}
 				// 스킬트리: 방금 통과한 레벨 구간에서 새로 해금된 노드들을 적용한다.
 				if (config.skillTree) {
@@ -365,6 +437,8 @@ export function createPlayerAgent(
 			const cost = this.nextUpgradeCost()
 			// 비상 나무 비축(reserveWood)을 남기고 강화한다 — 자동 강화가 생존 자원을 갈취하지 않도록
 			if (this.woodCollected - cost < config.reserveWood) return false
+			// 무기 티어 상한: 이후 강화는 비용만 들고 효과가 없어서 자동 강화 무한루프를 막는다.
+			if (this.weaponMaxTier > 0 && this.weaponTier >= this.weaponMaxTier) return false
 			this.woodCollected -= cost
 			this.weaponTier += 1
 			this.attackDamage += config.weaponAttackPerTier
@@ -379,10 +453,43 @@ export function createPlayerAgent(
 
 		applyMasteryBonus(bonus) {
 			if (bonus.critChanceBonus) this.critChance = Math.min(1, this.critChance + bonus.critChanceBonus)
-			if (bonus.critMultiplierBonus) this.critMultiplier += bonus.critMultiplierBonus
+			if (bonus.critMultiplierBonus) {
+				this.critMultiplier = Math.min(critMultiplierCeiling, this.critMultiplier + bonus.critMultiplierBonus)
+			}
 			if (bonus.scanRangeBonus) this.extraScanRangePerLevel += bonus.scanRangeBonus
 			if (bonus.attackBonus) this.attackDamage += bonus.attackBonus
-			if (bonus.damageTakenMultiplier) this.damageTakenMultiplier *= bonus.damageTakenMultiplier
+			if (bonus.damageTakenMultiplier) {
+				const next = this.damageTakenMultiplier * bonus.damageTakenMultiplier
+				this.damageTakenMultiplier = damageTakenFloor > 0 ? Math.max(damageTakenFloor, next) : next
+			}
+		},
+
+		recordKill(speciesName: string, isBoss: boolean = false) {
+			if (!config.passiveTree) return
+			const result = recordPassiveKill(this.passiveTreeState, config.passiveTree, speciesName, isBoss, this)
+			this.passiveTreeState = result.state
+			this.pendingPassiveUnlocks = [...this.pendingPassiveUnlocks, ...result.newUnlocks]
+		},
+
+		recordCardChoice() {
+			if (!config.passiveTree) return
+			const result = recordPassiveCardChoice(this.passiveTreeState, config.passiveTree, this)
+			this.passiveTreeState = result.state
+			this.pendingPassiveUnlocks = [...this.pendingPassiveUnlocks, ...result.newUnlocks]
+		},
+
+		recordLevelReached(level: number) {
+			if (!config.passiveTree) return
+			const result = recordPassiveLevelReached(this.passiveTreeState, config.passiveTree, level, this)
+			this.passiveTreeState = result.state
+			this.pendingPassiveUnlocks = [...this.pendingPassiveUnlocks, ...result.newUnlocks]
+		},
+
+		recordDayReached(day: number) {
+			if (!config.passiveTree) return
+			const result = recordPassiveDayReached(this.passiveTreeState, config.passiveTree, day, this)
+			this.passiveTreeState = result.state
+			this.pendingPassiveUnlocks = [...this.pendingPassiveUnlocks, ...result.newUnlocks]
 		},
 
 		update(delta, now) {
@@ -422,7 +529,7 @@ export function createPlayerAgent(
 
 			// ===== 자동 스킬: 교전 중일 때만 시전 =====
 			const inCombat = this.state === 'attacking' || this.state === 'hunting'
-			// 광역 강타: 사거리 무관 주변 모든 적 타격
+			// 광역 강타: 사거리 무관 주변 모든 적 타격. 일반 공격과 동일한 crit/flat 규칙을 따른다.
 			if (
 				this.level >= config.slamUnlockLevel
 				&& now - this.lastSlamAt >= config.slamCooldownMs * this.slamCooldownMultiplier
@@ -430,10 +537,13 @@ export function createPlayerAgent(
 			) {
 				this.lastSlamAt = now
 				const slamDamage = Math.round(this.attackDamage * config.slamDamageMultiplier)
+				const { finalDamage, isCrit } = this.attackRoll(slamDamage)
+				const handler = config.onAttackMonster
 				for (const threat of config.threatSources()) {
 					if (isDeadThreat(threat)) continue
 					if (distanceTo(this.position, threat.position) <= config.slamRadius) {
-						config.onAttackMonster?.(threat.id ?? '', slamDamage)
+						if (handler === undefined) continue
+						deliverAttack(handler, threat.id ?? '', finalDamage, isCrit)
 					}
 				}
 			}
@@ -657,7 +767,9 @@ function updateAttacking(agent: PlayerAgent, now: number, config: PlayerAgentCon
 	// 挥砍动画结束后真正造成伤害
 	if (now - lastAttackSwing >= swingWindow) {
 		if (liveTarget.id !== undefined) {
-			config.onAttackMonster?.(liveTarget.id, agent.attackDamage)
+			const { finalDamage, isCrit } = agent.attackRoll(agent.attackDamage)
+			const handler = config.onAttackMonster
+			if (handler !== undefined) deliverAttack(handler, liveTarget.id, finalDamage, isCrit)
 		}
 		lastAttackSwing = now
 		agent.attackingProgress = 0
@@ -1140,4 +1252,18 @@ function clampToWorld(point: PlanePoint, config: PlayerAgentConfig): PlanePoint 
 
 function distanceTo(from: PlanePoint, to: PlanePoint): number {
 	return Math.hypot(to[0] - from[0], to[1] - from[1])
+}
+
+/**
+ * onAttackMonster 콜백을 호출한다. crit이면 3번째 인자 true를, 아니면 2개만 전달한다.
+ * 분기 카운트를 명확히 분리하기 위해 별도 함수로 추출했다.
+ */
+function deliverAttack(
+	handler: (monsterId: string, damage: number, isCrit?: boolean) => void,
+	monsterId: string,
+	damage: number,
+	isCrit: boolean,
+): void {
+	if (isCrit) handler(monsterId, damage, true)
+	else handler(monsterId, damage)
 }

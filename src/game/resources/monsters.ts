@@ -99,8 +99,8 @@ type MonsterConfig = {
 	modelScale: number
 	hitStunMs: number
 	strengthMultipliers?: Record<string, number>
-	/** 리스폰 몬스터 스케일링: 경과 일차당 체력/공격력 증가율 */
-	dayScalePerDay?: number
+	/** 티어 스케일링: 티어당 체력/공격력 배율 (기하급수 — 미설정 또는 1 이하면 성장 없음) */
+	tierScalePerTier?: number
 	/** 보스 스탯 배율 (체력/공격력) */
 	bossHealthMultiplier?: number
 	bossDamageMultiplier?: number
@@ -169,14 +169,25 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 }
 
 /**
- * 주기 보스: Giant 모델 고정, 일반 몬스터 대비 대폭 강화된 스탯.
- * 위치는 Math.random 기반 (리스폰과 같은 의도적 비결정론 예외).
+ * 티어 스케일 배율: 티어 1 = 1, 티어 N = scalePerTier^(N-1) 기하급수.
+ * 방치형 설계의 핵심 — 몬스터는 지수, 플레이어는 선형 성장이라 후반에 벽이 생긴다.
+ * scalePerTier가 미설정이거나 1 이하면 성장하지 않는다(배율 1 고정).
  */
-export function createBossMonster(config: MonsterConfig, id: string, dayNumber: number): MonsterResource {
+export function tierStatScale(tierNumber: number, scalePerTier?: number): number {
+	if (!scalePerTier || scalePerTier <= 1) return 1
+	return Math.pow(scalePerTier, Math.max(0, tierNumber - 1))
+}
+
+/**
+ * 주기 보스(=티어 전환 게이트): Giant 모델 고정, 일반 몬스터 대비 대폭 강화된 스탯.
+ * 위치는 Math.random 기반 (리스폰과 같은 의도적 비결정론 예외).
+ * 현재 티어 스케일(tierStatScale)이 적용된다 — 토벌 후 다음 보스는 자동으로 더 강하다.
+ */
+export function createBossMonster(config: MonsterConfig, id: string, tierNumber: number): MonsterResource {
 	const modelName = 'Giant'
 	const modelIndex = config.modelUrls.length > 1 ? 1 : 0
 	const base = config.strengthMultipliers?.[modelName] ?? 1
-	const dayScale = 1 + (dayNumber - 1) * (config.dayScalePerDay ?? 0)
+	const tierScale = tierStatScale(tierNumber, config.tierScalePerTier)
 	const healthMultiplier = base * (config.bossHealthMultiplier ?? 2)
 	const damageMultiplier = base * (config.bossDamageMultiplier ?? 0.8)
 	const maxRadius = config.radiusMeters * 0.8
@@ -194,9 +205,9 @@ export function createBossMonster(config: MonsterConfig, id: string, dayNumber: 
 		patrolRadius: config.patrolRadius,
 		speed: config.speed,
 		detectionRadius: config.detectionRadius,
-		health: Math.round(config.health * healthMultiplier * dayScale),
-		maxHealth: Math.round(config.health * healthMultiplier * dayScale),
-		attackDamage: Math.round(config.attackDamage * damageMultiplier * dayScale),
+		health: Math.round(config.health * healthMultiplier * tierScale),
+		maxHealth: Math.round(config.health * healthMultiplier * tierScale),
+		attackDamage: Math.round(config.attackDamage * damageMultiplier * tierScale),
 		attackCooldownMs: config.attackCooldownMs,
 		activityRadius: config.activityRadius,
 		hitStunMs: config.hitStunMs,
@@ -207,18 +218,18 @@ export function createBossMonster(config: MonsterConfig, id: string, dayNumber: 
 /**
  * 죽은 몬스터 자리에 리스폰되는 새 몬스터 리소스.
  * - 위치/회전/크기는 Math.random 기반 (createRandomTree와 같은 의도적 비결정론 예외 — 테스트에서 mock)
- * - 체력/공격력은 모델 강도 배율 × 일차 스케일(1 + (day-1) × dayScalePerDay)이 적용된다.
+ * - 체력/공격력은 모델 강도 배율 × 티어 스케일(scalePerTier^(tier-1))이 적용된다.
  */
 export function createRespawnMonster(
 	config: MonsterConfig,
 	id: string,
 	modelIndex: number,
-	dayNumber: number,
+	tierNumber: number,
 ): MonsterResource {
 	const modelName = modelNames[modelIndex] ?? modelNames[0]
 	const strengthMultiplier = config.strengthMultipliers?.[modelName] ?? 1
 	const behavior = speciesOf(config, modelName)
-	const dayScale = 1 + (dayNumber - 1) * (config.dayScalePerDay ?? 0)
+	const tierScale = tierStatScale(tierNumber, config.tierScalePerTier)
 	const maxRadius = config.radiusMeters * 0.8
 	const angle = Math.random() * Math.PI * 2
 	const dist = Math.sqrt(Math.random()) * maxRadius
@@ -235,9 +246,9 @@ export function createRespawnMonster(
 		patrolRadius: config.patrolRadius * (0.7 + Math.random() * 0.6),
 		speed: config.speed * (0.8 + Math.random() * 0.4) * (behavior.speedMultiplier ?? 1),
 		detectionRadius: Math.round(config.detectionRadius * (behavior.detectionMultiplier ?? 1)),
-		health: Math.round(config.health * strengthMultiplier * dayScale),
-		maxHealth: Math.round(config.health * strengthMultiplier * dayScale),
-		attackDamage: Math.round(config.attackDamage * strengthMultiplier * dayScale * (behavior.attackDamageMultiplier ?? 1)),
+		health: Math.round(config.health * strengthMultiplier * tierScale),
+		maxHealth: Math.round(config.health * strengthMultiplier * tierScale),
+		attackDamage: Math.round(config.attackDamage * strengthMultiplier * tierScale * (behavior.attackDamageMultiplier ?? 1)),
 		attackCooldownMs: Math.round(config.attackCooldownMs * (behavior.attackCooldownMultiplier ?? 1)),
 		activityRadius: config.activityRadius * (0.85 + Math.random() * 0.3),
 		hitStunMs: config.hitStunMs,
