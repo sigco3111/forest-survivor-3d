@@ -194,6 +194,21 @@
 				{{ label }}
 			</div>
 		</div>
+		<div v-if="achievementSummary.total > 0" class="achievement-panel">
+			<div class="achievement-panel__title">
+				{{ t('hud.achievement.title') }} · {{ achievementSummary.unlockedCount }}/{{ achievementSummary.total }}
+			</div>
+			<div
+				v-for="badge in achievementSummary.badges"
+				:key="badge.id"
+				class="achievement-panel__row"
+				:class="{ 'achievement-panel__row--locked': !badge.unlocked }"
+			>
+				<span class="achievement-panel__icon">{{ badge.unlocked ? '🏆' : '🔒' }}</span>
+				<span class="achievement-panel__label">{{ badge.label }}</span>
+				<span class="achievement-panel__xp">+{{ badge.xp }}</span>
+			</div>
+		</div>
 		<div v-if="bossBar" class="boss-bar">
 			<div class="boss-bar__name">{{ bossBar.name }} · {{ bossBar.distance }}m</div>
 			<div class="boss-bar__track">
@@ -387,6 +402,8 @@ async function changeLocale(nextLocale: AppLocale): Promise<void> {
 	await setLocale(nextLocale)
 	document.documentElement.lang = nextLocale
 	storeLocale(localStorage, nextLocale)
+	// 언어 전환 시 이미 그려진 배지/요약 라벨도 새 로캘로 다시 쓴다
+	refreshMetaSummary()
 }
 
 onMounted(() => {
@@ -676,6 +693,13 @@ const metaSummary = ref<{ totalXp: number; metaLevel: number; xpIntoLevel: numbe
 	startBonus: { extraHealth: 0, extraAttack: 0, extraWood: 0, extraCritChance: 0, extraCritMultiplier: 0, extraCollectRadiusMultiplier: 1 },
 	perks: [],
 })
+// 업적 배지 패널 뷰 모델. metaState는 반응형이 아니므로 refreshMetaSummary()에서 매번 재구축한다.
+type AchievementBadgeView = { id: string; label: string; xp: number; unlocked: boolean }
+const achievementSummary = ref<{ unlockedCount: number; total: number; badges: AchievementBadgeView[] }>({
+	unlockedCount: 0,
+	total: 0,
+	badges: [],
+})
 let lastRunXpEarned = 0
 let runBuildingsBuilt = 0
 let runGoldenTreesCollected = 0
@@ -744,6 +768,20 @@ function refreshMetaSummary() {
 		lastRunXp: lastRunXpEarned,
 		startBonus: startBonusFor(metaState.metaLevel, META_PERK_CONFIG),
 		perks: [...availablePerks(META_PERK_CONFIG, metaState.metaLevel)],
+	}
+
+	// 업적 배지 그리드: 전체 정의를 능동/잠금 상태와 함께 재구축한다 (달성 즉시 패널에 반영).
+	const unlockedAchievements = new Set(metaState.unlockedAchievements)
+	const badges: AchievementBadgeView[] = ACHIEVEMENT_CONFIG.definitions.map(definition => ({
+		id: definition.id,
+		label: t(`achievement['${definition.id}']`),
+		xp: definition.metaXpReward,
+		unlocked: unlockedAchievements.has(definition.id),
+	}))
+	achievementSummary.value = {
+		unlockedCount: badges.filter(badge => badge.unlocked).length,
+		total: badges.length,
+		badges,
 	}
 }
 
@@ -3195,6 +3233,62 @@ function disposeScene() {
 	border-top: 1px solid rgba(53, 244, 255, 0.12);
 	font-size: 10px;
 	line-height: 1.35;
+}
+
+// 업적 배지 패널: 전체 정의를 나열해 달성/미달성을 상시 보여준다 (트로피 금색 테마)
+.achievement-panel {
+	position: absolute;
+	top: 750px;
+	left: 20px;
+	z-index: 2;
+	width: 180px;
+	max-height: 190px;
+	overflow: auto;
+	padding: 10px 12px;
+	border: 1px solid rgba(255, 209, 102, 0.32);
+	border-radius: 12px;
+	background: rgba(3, 12, 24, 0.68);
+	color: #dffcff;
+	font-family: ui-sans-serif, system-ui, sans-serif;
+	box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+	backdrop-filter: blur(12px);
+}
+
+.achievement-panel__title {
+	margin-bottom: 6px;
+	font-size: 11px;
+	font-weight: 700;
+	color: #ffd166;
+	text-shadow: 0 0 12px rgba(255, 209, 102, 0.35);
+}
+
+.achievement-panel__row {
+	display: flex;
+	gap: 5px;
+	align-items: baseline;
+	justify-content: space-between;
+	padding: 3px 0;
+	border-top: 1px solid rgba(255, 209, 102, 0.12);
+	font-size: 10px;
+	line-height: 1.35;
+}
+
+.achievement-panel__row--locked {
+	opacity: 0.45;
+}
+
+.achievement-panel__icon {
+	flex: none;
+}
+
+.achievement-panel__label {
+	flex: 1 1 auto;
+}
+
+.achievement-panel__xp {
+	flex: none;
+	font-weight: 700;
+	color: #ffd166;
 }
 
 .minimap-toggle {

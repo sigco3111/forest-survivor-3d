@@ -104,6 +104,9 @@ export const messages = {
 				hint: 'Slain counts',
 				bonus: 'Bonus',
 			},
+			achievement: {
+				title: 'Achievements',
+			},
 			elite: {
 				swift: 'Swift',
 				brute: 'Brute',
@@ -291,6 +294,9 @@ export const messages = {
 				hint: '击杀数',
 				bonus: '加成',
 			},
+			achievement: {
+				title: '成就',
+			},
 			elite: {
 				swift: '迅捷',
 				brute: '蛮力',
@@ -477,6 +483,9 @@ export const messages = {
 				title: '숙련도',
 				hint: '종족 처치수',
 				bonus: '보너스',
+			},
+			achievement: {
+				title: '업적',
 			},
 			elite: {
 				swift: '신속한',
