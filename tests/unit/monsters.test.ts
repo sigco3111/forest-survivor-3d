@@ -5,8 +5,12 @@ import {
   createMonsterResources,
   createBossMonster,
   createRespawnMonster,
+  applyElitePrefix,
+  eliteChanceForTier,
   effectiveDetectionRadius,
+  pickElitePrefix,
   tierStatScale,
+  type ElitePrefix,
   type MonsterResource,
   type MonsterUpdateContext,
 } from '../../src/game/resources/monsters'
@@ -163,6 +167,99 @@ describe('monster resources', () => {
     // 티어 0/음수 → 클램프
     expect(tierStatScale(0, 1.25)).toBe(1)
     expect(tierStatScale(-3, 1.25)).toBe(1)
+  })
+
+  it('elite chance gates by tier and grows with a cap', () => {
+    const config = { firstTier: 3, baseChance: 0.12, chancePerTier: 0.03, chanceCap: 0.35 }
+
+    // 첫 티어 미만 → 엘리트 없음
+    expect(eliteChanceForTier(1, config)).toBe(0)
+    expect(eliteChanceForTier(2, config)).toBe(0)
+    // 첫 엘리트 티어 → 기본 확률
+    expect(eliteChanceForTier(3, config)).toBeCloseTo(0.12)
+    // 티어당 선형 증가 (티어 5 = 0.12 + 2×0.03)
+    expect(eliteChanceForTier(5, config)).toBeCloseTo(0.18)
+    // 상한 클램프 (티어 99라도 0.35)
+    expect(eliteChanceForTier(99, config)).toBeCloseTo(0.35)
+  })
+
+  it('pickElitePrefix maps the random deterministically and tolerates empty lists', () => {
+    const prefixes: ElitePrefix[] = [
+      { id: 'swift' },
+      { id: 'brute' },
+      { id: 'cunning' },
+    ]
+
+    // 빈 목록 → null (평범한 개체 유지)
+    expect(pickElitePrefix([], 0.5)).toBeNull()
+    // 인덱스 매핑: floor(0.5×3)=1 → brute, 경계값은 마지막 요소로 클램프
+    expect(pickElitePrefix(prefixes, 0.5)?.id).toBe('brute')
+    expect(pickElitePrefix(prefixes, 0)?.id).toBe('swift')
+    expect(pickElitePrefix(prefixes, 0.999)?.id).toBe('cunning')
+    // random이 정확히 1이어도 안전 (모듈로 클램프)
+    expect(pickElitePrefix(prefixes, 1)?.id).toBe('swift')
+    // 비정상 random(NaN/음수)도 첫 접두사로 안전하게 폴백한다
+    expect(pickElitePrefix(prefixes, Number.NaN)?.id).toBe('swift')
+    expect(pickElitePrefix(prefixes, -0.5)?.id).toBe('swift')
+  })
+
+  it('applyElitePrefix returns a boosted copy without mutating the input', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const base = createRespawnMonster({
+      modelUrls: ['/goblin.glb'],
+      seed: 7,
+      count: 1,
+      radiusMeters: 500,
+      scaleRange: [1, 1] as [number, number],
+      patrolRadius: 80,
+      speed: 22,
+      detectionRadius: 120,
+      attackRadius: 20,
+      health: 100,
+      attackDamage: 10,
+      attackCooldownMs: 1_500,
+      activityRadius: 170,
+      modelScale: 6,
+      hitStunMs: 700,
+    }, 'monster-elite-src', 0, 1)
+
+    const swift: ElitePrefix = { id: 'swift', color: '#7dfcff', speedMultiplier: 1.35, healthMultiplier: 1.25 }
+    const promoted = applyElitePrefix(base, swift)
+
+    // 새 객체 — 원본은 훼손되지 않는다
+    expect(promoted).not.toBe(base)
+    expect(base.health).toBe(100)
+    expect(base.eliteId).toBeUndefined()
+
+    // 스탯 반올림 적용 + eliteId 기록
+    expect(promoted.eliteId).toBe('swift')
+    expect(promoted.maxHealth).toBe(125)
+    expect(promoted.health).toBe(125)
+    expect(promoted.speed).toBeCloseTo(22 * 1.35)
+    // 미지정 배율은 그대로 (반올림 동일값)
+    expect(promoted.attackDamage).toBe(base.attackDamage)
+    expect(promoted.detectionRadius).toBe(base.detectionRadius)
+
+    // 전체 배율 접두사: 공격력/쿨다운/탐지 반경 모두 반올림 적용
+    const full: ElitePrefix = {
+      id: 'brute',
+      healthMultiplier: 1.8,
+      attackMultiplier: 1.4,
+      attackCooldownMultiplier: 0.7,
+      detectionMultiplier: 1.6,
+    }
+    const brute = applyElitePrefix(base, full)
+    expect(brute.eliteId).toBe('brute')
+    expect(brute.maxHealth).toBe(180)
+    expect(brute.attackDamage).toBe(Math.round(10 * 1.4))
+    expect(brute.attackCooldownMs).toBe(Math.round(1500 * 0.7))
+    expect(brute.detectionRadius).toBe(Math.round(120 * 1.6))
+
+    // 체력 배율이 없는 접두사도 안전 (?? 1 기본 가지)
+    const bare: ElitePrefix = { id: 'cunning' }
+    const unchanged = applyElitePrefix(base, bare)
+    expect(unchanged.eliteId).toBe('cunning')
+    expect(unchanged.maxHealth).toBe(base.health)
   })
 
   it('createBossMonster builds a heavily scaled always-aggro boss', () => {

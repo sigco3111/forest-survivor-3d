@@ -4,6 +4,7 @@ import {
 	META_CONFIG,
 	META_SAVE_KEY,
 	META_SAVE_VERSION,
+	applyRawXp,
 	applyRunXp,
 	availablePerks,
 	clearMetaState,
@@ -425,5 +426,32 @@ describe('meta perks', () => {
     const initial: MetaState = { ...emptyMetaState(), metaLevel: 5, unlockedPerks: ['vitality'] }
     const next = applyRunXp(initial, 1000, [])
     expect(next.unlockedPerks).toEqual(['edge', 'vitality'])
+  })
+
+  it('applyRawXp accumulates xp without counting a run or species unlocks', () => {
+    const before = emptyMetaState()
+    const after = applyRawXp(before, 100)
+
+    // 런 카운터/도감은 그대로 — 오프라인 지급은 실제 런이 아니다
+    expect(after.totalRuns).toBe(before.totalRuns)
+    expect(after.unlockedSpecies).toEqual([])
+    expect(after.totalXp).toBe(100)
+    expect(after.xpIntoLevel).toBe(100)
+  })
+
+  it('applyRawXp levels up across thresholds and reconciles perks', () => {
+    // metaLevelXp(1) = 200 → 250 xp면 1레벨 + 잉여 50
+    const after = applyRawXp(emptyMetaState(), 250)
+    expect(after.metaLevel).toBe(1)
+    expect(after.xpIntoLevel).toBe(50)
+    expect(after.totalXp).toBe(250)
+    // 레벨업으로 perk 임계치 도달 시 자동 반영 (vitality: level 2? → 미도달)
+    expect(after.unlockedPerks).toEqual([])
+  })
+
+  it('applyRawXp ignores zero/negative xp and returns equivalent state values', () => {
+    const before = { ...emptyMetaState(), totalXp: 10, xpIntoLevel: 3 }
+    expect(applyRawXp(before, 0)).toMatchObject({ totalXp: 10, xpIntoLevel: 3 })
+    expect(applyRawXp(before, -5).totalXp).toBe(10)
   })
 })

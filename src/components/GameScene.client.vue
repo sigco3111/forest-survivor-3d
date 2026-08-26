@@ -237,7 +237,9 @@ import {
 	AmbientLight,
 	Box3,
 	Clock,
+	Color,
 	DirectionalLight,
+	Fog,
 	Group,
 	HemisphereLight,
 	Material,
@@ -272,6 +274,7 @@ import {
 	COMBAT_AGGRESSION_CONFIG,
 	DEAD_TREE_CONFIG,
 	DAY_CYCLE_CONFIG,
+	ELITE_CONFIG,
 	ENVIRONMENT_CONFIG,
 	EVENT_CONFIG,
 	LEVEL_UP_CONFIG,
@@ -281,12 +284,14 @@ import {
 	MONSTER_GUARDIAN_CONFIG,
 	PASSIVE_TREE_CONFIG,
 	PLAYER_CONFIG,
-		PRESET_CONFIG,
-		PROGRESSION_CONFIG,
-		SKILL_CONFIG,
-		SKILL_TREE_CONFIG,
-		TREE_RESOURCE_CONFIG,
+	PRESET_CONFIG,
+	PROGRESSION_CONFIG,
+	SKILL_CONFIG,
+	SKILL_TREE_CONFIG,
+	TIER_TONE_CONFIG,
+	TREE_RESOURCE_CONFIG,
 	WEAPON_CONFIG,
+	WEATHER_CONFIG,
 } from '~/config'
 import {
 	createPlayerAnimationController,
@@ -321,6 +326,9 @@ import {
 	createMonsterResources,
 	createBossMonster,
 	createRespawnMonster,
+	applyElitePrefix,
+	eliteChanceForTier,
+	pickElitePrefix,
 	type MonsterAgent,
 	type MonsterResource,
 	type MonsterUpdateContext,
@@ -343,9 +351,10 @@ import {
 	createLightingController,
 	type LightingController,
 } from '~/game/time/lighting'
-import { eventsForDay, type ScheduledEvent } from '~/game/events/scheduler'
+import { eventsForDay, type ScheduledEvent, type WeatherKind } from '~/game/events/scheduler'
 import { createMasteryState, emptyMasteryBonus, recordKill, toApplication, type MasteryState } from '~/game/player/mastery'
-import { applyRunXp, availablePerks, computeRunXp, emptyMetaState, loadMetaState, META_CONFIG, reconcileUnlockedPerks, saveMetaState, startBonusFor, type MetaState, type StartBonus } from '~/game/meta-progression'
+import { applyRawXp, applyRunXp, availablePerks, computeRunXp, emptyMetaState, loadMetaState, META_CONFIG, reconcileUnlockedPerks, saveMetaState, startBonusFor, type MetaState, type StartBonus } from '~/game/meta-progression'
+import { computeOfflineGain, isMeaningfulOfflineGain, type OfflineGain } from '~/game/offline-progress'
 import { loadRunState, saveRunState, clearRunState, type RunSaveState } from '~/game/save'
 
 defineOptions({
@@ -602,6 +611,8 @@ let cameraShakeOffsetX = 0
 let cameraShakeOffsetZ = 0
 let pendingRaid = { day: 0, count: 0 }
 let lastDayEvents: ScheduledEvent[] = []
+// 기상 이변: 해 뜰 때 결정되어 하루 종료(다음 새벽)까지 유지된다
+let activeWeather: WeatherKind | null = null
 let goldenTreeId: string | null = null
 let goldenTreeBonus = 0
 let masteryState: MasteryState | null = null
@@ -660,6 +671,13 @@ onMounted(() => {
 	loadedSave.value = loadRunState(localStorage)
 	metaState = loadMetaState(localStorage) ?? emptyMetaState()
 	refreshMetaSummary()
+	// 오프라인 진행: 저장 시점부터의 이탈을 미리 계산해 둔다 (이어하기 시 지급)
+	if (loadedSave.value) {
+		pendingOfflineGain = computeOfflineGain(
+			Date.now() - loadedSave.value.savedAtMs,
+			loadedSave.value.bossKills + 1,
+		)
+	}
 })
 
 function refreshMetaSummary() {
@@ -979,14 +997,48 @@ function processRespawns() {
 		const task = pendingRespawns[0]
 		if (task.dueDay > currentDay.value) break
 		pendingRespawns.shift()
-		const resource = createRespawnMonster(
+		let resource = createRespawnMonster(
 			MONSTER_CONFIG,
 			`monster-respawn-${respawnSeq++}`,
 			task.modelIndex,
 			currentTier.value,
 		)
+		const promoted = maybePromoteToElite(resource)
+		resource = promoted.resource
 		spawnMonsterVisual(resource, scene)
+		if (resource.eliteId) tintEliteMonster(resource.id, promoted.color)
 	}
+}
+
+// ===== 엘리트 몬스터: 티어 3+ 리스폰을 확률적으로 접두사 개체로 승격 =====
+
+/** 확률 판정 → 접두사 선택 → 스탯 적용 + 출현 로그. 탈락 시 원본 그대로 반환한다. */
+function maybePromoteToElite(resource: MonsterResource): { resource: MonsterResource; color?: string } {
+	const chance = eliteChanceForTier(currentTier.value, ELITE_CONFIG)
+	if (chance <= 0 || Math.random() >= chance) return { resource }
+	const prefix = pickElitePrefix(ELITE_CONFIG.prefixes, Math.random())
+	if (!prefix) return { resource }
+	const promoted = applyElitePrefix(resource, prefix)
+	logEvent(t('hud.log.eliteSpawn', { name: eliteLabel(prefix.id) }), 'boss')
+	return { resource: promoted, color: prefix.color }
+}
+
+function eliteLabel(eliteId: string): string {
+	return t(`hud.elite.${eliteId}`)
+}
+
+/** 엘리트 오라: 모델 emissive에 접두사 색을 입혀 관전자가 위험도를 읽게 한다 */
+function tintEliteMonster(monsterId: string, color?: string) {
+	const obj = monsterObjects.get(monsterId)
+	if (!obj || !color) return
+	obj.traverse(child => {
+		if (child instanceof Mesh) {
+			const material = child.material as MeshStandardMaterial
+			if (!material) return
+			material.emissive = new MeshStandardMaterial({ color }).emissive
+			material.emissiveIntensity = 0.55
+		}
+	})
 }
 
 // ===== 보스: bossIntervalDays마다 스폰, 상시 추격, 전용 HP바 =====
@@ -1080,12 +1132,19 @@ function settleKill(agent: MonsterAgent) {
 		showToast(tierMsg)
 		logEvent(tierMsg, 'boss')
 		cameraDirector?.triggerBossIntro(gameNow)
+		// 새 티어의 대기 톤(안개 색)으로 전환한다
+		applyAtmosphere()
 	} else {
-		logEvent(t('hud.log.kill', { model: agent.resource.modelName, count: reward }), 'kill')
+		// 엘리트는 접두사 이름으로 기록해 어떤 개체였는지 로그에서 추적 가능하게 한다
+		const label = agent.resource.eliteId
+			? `${eliteLabel(agent.resource.eliteId)} ${agent.resource.modelName}`
+			: agent.resource.modelName
+		logEvent(t('hud.log.kill', { model: label, count: reward }), 'kill')
 	}
 	// 처치 보상으로 체력 회복 + 경험치 (레벨업 시 공격력/체력/속도 증가)
+	// 붉은 달에는 처치 경험치가 배율만큼 증가한다.
 	playerAgent?.applyKillHeal()
-	playerAgent?.addExperience(agent.resource.maxHealth)
+	playerAgent?.addExperience(Math.round(agent.resource.maxHealth * weatherExpMultiplier()))
 	// 패시브 트리: 처치 이벤트를 기록 (보스 여부 함께)
 	playerAgent?.recordKill(agent.resource.modelName, agent.resource.isBoss)
 	// 종족 숙련도: 누적 → 임계치 보너스 자동 적용
@@ -1217,6 +1276,8 @@ const PRESET_IDS: PlayerPresetId[] = ['aggressive', 'balanced', 'survivor']
 const runStarted = ref(false)
 const selectedPreset = ref<PlayerPresetId | null>(null)
 const loadedSave = ref<RunSaveState | null>(null)
+// 이어하기 대기 중 계산된 오프라인 지급분 (continueSave에서 1회 소모)
+let pendingOfflineGain: OfflineGain | null = null
 const vignetteIntensity = ref(0)
 
 /** 시작 오버레이 표시 여부: 저장된 데이터가 있으면 이어하기·새로 시작 둘 다 노출, 없으면 프리셋 3개만 */
@@ -1251,6 +1312,25 @@ function continueSave(): void {
 	if (!loadedSave.value || !loadedSave.value.preset) return
 	selectedPreset.value = loadedSave.value.preset
 	startRun(loadedSave.value.preset, loadedSave.value)
+	grantPendingOfflineGain()
+}
+
+/** 오프라인 진행 지급: 이어하기 직후 1회. 목재는 런에, 메타 XP는 영구 저장소로. */
+function grantPendingOfflineGain() {
+	const gain = pendingOfflineGain
+	pendingOfflineGain = null
+	if (!gain || !isMeaningfulOfflineGain(gain)) return
+	if (gain.wood > 0 && playerAgent) awardWood(gain.wood)
+	if (gain.metaXp > 0) {
+		metaState = applyRawXp(metaState, gain.metaXp)
+		saveMetaState(localStorage, metaState)
+		refreshMetaSummary()
+	}
+	const hours = Math.floor(gain.cappedMs / 3_600_000)
+	const minutes = Math.floor((gain.cappedMs % 3_600_000) / 60_000)
+	const msg = t('hud.log.offline', { hours, minutes, wood: gain.wood, xp: gain.metaXp })
+	logEvent(msg, 'day')
+	showToast(msg)
 }
 
 function startRun(preset: PlayerPresetId, saveState: RunSaveState | null): void {
@@ -1259,6 +1339,8 @@ function startRun(preset: PlayerPresetId, saveState: RunSaveState | null): void 
 	// 씬 생성은 기존 createScene을 재활용 (없으면 새로 만들고, 세이브 복원이면 applySavedState로 덮어쓴다)
 	createScene()
 	if (saveState) applySavedState(saveState)
+	// 티어/기상에 맞는 대기 톤으로 시작한다
+	applyAtmosphere()
 	autosaveCurrentRun()
 }
 function recordRun() {
@@ -1569,8 +1651,9 @@ function updateMonsters(delta: number, now: number) {
 			|| playerAgent.state === 'hunting',
 		playerIsFleeing: playerAgent.state === 'fleeing',
 		isNight: dayCycle?.state.isNight ?? false,
-		// 모닥불 반경 안이면 실효 탐지 반경이 감쇠된다 (각 모닥불이 곱셈으로 작용).
-		detectionMultiplier: buildingManager?.detectionMultiplierAt(playerAgent.position) ?? 1,
+		// 모닥불 반경 안이면 실효 탐지 반경이 감쇠되고, 기상 이변(붉은 달/안개)이 곱해진다.
+		detectionMultiplier: (buildingManager?.detectionMultiplierAt(playerAgent.position) ?? 1)
+			* weatherDetectionFactor(),
 		// 울타리: 몬스터가 직진으로 막히면 ±π/6·±π/3·±π/2 팬으로 우회 시도 (MONSTER_DETOUR_OFFSETS).
 		obstacleCheck: buildingManager ? pos => buildingManager!.blocks(pos) : undefined,
 		// 원거리 종족 (Demon 등) 발사: 게임 로직의 projectile manager로 위임 (시각화도 거기서).
@@ -2011,6 +2094,8 @@ function autoRestartRun() {
 // ===== 2·3단계: 이벤트 처리 / 자동 건설 / 밤습격 / 자동 저장 / 복원 =====
 function processDayEvents(dayNumber: number) {
 	if (!playerAgent) return
+	// 새로운 하루 — 어제의 기상은 끝났다
+	activeWeather = null
 	lastDayEvents = eventsForDay(EVENT_CONFIG, dayNumber)
 	for (const ev of lastDayEvents) {
 		if (ev.type === 'nightRaid') {
@@ -2023,7 +2108,58 @@ function processDayEvents(dayNumber: number) {
 			const msg = t('hud.log.goldenTree', { count: ev.woodBonus })
 			showToast(msg)
 			logEvent(msg, 'kill')
+		} else if (ev.type === 'weather') {
+			// 티어 게이팅: WEATHER_CONFIG.firstTier 미만이면 스케줄돼도 무시한다 (평온한 초반)
+			if (currentTier.value < WEATHER_CONFIG.firstTier) continue
+			activeWeather = ev.kind
+			const msg = ev.kind === 'bloodMoon'
+				? t('hud.log.bloodMoon')
+				: t('hud.log.fog')
+			showToast(msg)
+			logEvent(msg, 'day')
 		}
+	}
+	// 기상/티어가 바뀌었으니 대기 분위기(안개 색·밀도)를 다시 계산한다
+	applyAtmosphere()
+}
+
+// ===== 기상 이변 효과 + 티어 대기 톤 =====
+
+/** 몬스터 실탐지 반경에 곱해지는 기상 배율 (모닥불 감쇠와 곱산) */
+function weatherDetectionFactor(): number {
+	if (activeWeather === 'bloodMoon') return WEATHER_CONFIG.bloodMoonDetectionMultiplier
+	if (activeWeather === 'fog') return WEATHER_CONFIG.fogDetectionMultiplier
+	return 1
+}
+
+/** 처치 경험치에 곱해지는 기상 배율 */
+function weatherExpMultiplier(): number {
+	return activeWeather === 'bloodMoon' ? WEATHER_CONFIG.bloodMoonExpMultiplier : 1
+}
+
+/**
+ * 월드 안개 = 티어 팔레트 색 + 기상 오버라이드.
+ * 티어마다 안개 색이 순환해 "새 스테이지" 인상을 주고, 붉은 달/안개는 그 위에 물든다.
+ */
+function applyAtmosphere() {
+	if (!scene) return
+	const palette = TIER_TONE_CONFIG.colors
+	const tierColor = new Color(palette[(currentTier.value - 1 + palette.length) % palette.length])
+	let color = tierColor
+	let farFactor = TIER_TONE_CONFIG.fogFarFactor
+	if (activeWeather === 'bloodMoon') color = tierColor.lerp(new Color('#8a1f1f'), 0.65)
+	if (activeWeather === 'fog') {
+		color = tierColor.lerp(new Color('#c9d4d8'), 0.7)
+		farFactor *= 0.55 // 짙은 안개: 시야가 눈앞으로 줄어든다
+	}
+	const near = WORLD_RADIUS * TIER_TONE_CONFIG.fogNearFactor
+	const far = WORLD_RADIUS * farFactor
+	if (scene.fog instanceof Fog) {
+		scene.fog.color.copy(color)
+		scene.fog.near = near
+		scene.fog.far = far
+	} else {
+		scene.fog = new Fog(color.getHex(), near, far)
 	}
 }
 

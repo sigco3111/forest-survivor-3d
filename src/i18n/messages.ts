@@ -60,6 +60,7 @@ export const messages = {
 			},
 			log: {
 				kill: 'Kill: {model} (+{count})',
+				eliteSpawn: 'Elite {name} emerges!',
 				hurt: 'Damage -{count}',
 				levelup: 'Level {level} reached!',
 				day: 'Day {day} begins',
@@ -77,6 +78,9 @@ export const messages = {
 				goldenCollected: 'Golden tree felled! +{count} wood',
 				buildCampfire: 'Campfire built (-{count} wood)',
 				buildFence: 'Palisade raised (-{count} wood)',
+				bloodMoon: 'The blood moon rises — monsters grow restless, EXP ×1.5!',
+				fog: 'A thick fog rolls in — the monsters lose track of you...',
+				offline: 'The forest kept moving while you were away ({hours}h {minutes}m) — wood +{wood}, meta XP +{xp}',
 			},
 			summary: {
 				title: 'Day {day} complete',
@@ -96,6 +100,11 @@ export const messages = {
 				title: 'Mastery',
 				hint: 'Slain counts',
 				bonus: 'Bonus',
+			},
+			elite: {
+				swift: 'Swift',
+				brute: 'Brute',
+				cunning: 'Cunning',
 			},
 			passive: {
 				title: 'Passive tree',
@@ -219,6 +228,7 @@ export const messages = {
 			},
 			log: {
 				kill: '击杀：{model}（+{count}）',
+				eliteSpawn: '精英 {name} 出现！',
 				hurt: '受到伤害 -{count}',
 				levelup: '达到 {level} 级！',
 				day: '第 {day} 天开始',
@@ -236,6 +246,9 @@ export const messages = {
 				goldenCollected: '黄金树已砍倒！+{count} 木材',
 				buildCampfire: '建造了篝火（-{count} 木材）',
 				buildFence: '竖起了栅栏（-{count} 木材）',
+				bloodMoon: '血月升起 —— 怪物躁动不安，经验 ×1.5！',
+				fog: '浓雾弥漫 —— 怪物失去了你的踪迹……',
+				offline: '你不在的时候森林仍在运转（{hours}小时{minutes}分）—— 木材 +{wood}，元经验 +{xp}',
 			},
 			summary: {
 				title: '第 {day} 天结束',
@@ -255,6 +268,11 @@ export const messages = {
 				title: '熟练度',
 				hint: '击杀数',
 				bonus: '加成',
+			},
+			elite: {
+				swift: '迅捷',
+				brute: '蛮力',
+				cunning: '狡诈',
 			},
 			passive: {
 				title: '被动树',
@@ -378,6 +396,7 @@ export const messages = {
 			},
 			log: {
 				kill: '처치: {model} (+{count})',
+				eliteSpawn: '정예 {name} 출현!',
 				hurt: '피해 -{count}',
 				levelup: '레벨 {level} 달성!',
 				day: '{day}일차 시작',
@@ -395,6 +414,9 @@ export const messages = {
 				goldenCollected: '황금 나무 벌목! +{count} 나무',
 				buildCampfire: '모닥불을 지었다 (-{count} 나무)',
 				buildFence: '울타리를 세웠다 (-{count} 나무)',
+				bloodMoon: '붉은 달이 떠올랐다 — 몬스터가 흥분하고 경험치 ×1.5!',
+				fog: '짙은 안개가 끼었다 — 몬스터가 당신을 놓친다...',
+				offline: '자리를 비운 동안에도 숲은 돌아갔다 ({hours}시간 {minutes}분) — 나무 +{wood}, 메타 XP +{xp}',
 			},
 			summary: {
 				title: '{day}일차 종료',
@@ -414,6 +436,11 @@ export const messages = {
 				title: '숙련도',
 				hint: '종족 처치수',
 				bonus: '보너스',
+			},
+			elite: {
+				swift: '신속한',
+				brute: '견고한',
+				cunning: '교활한',
 			},
 			passive: {
 				title: '패시브 트리',

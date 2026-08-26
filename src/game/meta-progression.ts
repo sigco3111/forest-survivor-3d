@@ -114,6 +114,31 @@ export function applyRunXp(state: MetaState, runXp: number, unlockedSpecies: rea
 	}
 }
 
+/**
+ * 메타 상태에 순수 XP만 누적한다 (오프라인 지급용).
+ * applyRunXp와 달리 totalRuns/unlockedSpecies를 건드리지 않는다 — 실제 런이 아니므로.
+ * 레벨업 시 perk 임계치도 함께 재조정된다.
+ */
+export function applyRawXp(state: MetaState, xp: number): MetaState {
+	if (xp <= 0) return state
+	const totalXp = state.totalXp + xp
+	let metaLevel = state.metaLevel
+	let xpIntoLevel = state.xpIntoLevel + xp
+	while (xpIntoLevel >= META_CONFIG.metaLevelXp(metaLevel + 1)) {
+		xpIntoLevel -= META_CONFIG.metaLevelXp(metaLevel + 1)
+		metaLevel += 1
+	}
+	return {
+		version: META_SAVE_VERSION,
+		totalXp,
+		metaLevel,
+		xpIntoLevel,
+		totalRuns: state.totalRuns,
+		unlockedSpecies: [...state.unlockedSpecies],
+		unlockedPerks: mergePerks(state.unlockedPerks, availablePerks(META_PERK_CONFIG, metaLevel)),
+	}
+}
+
 export type MetaPerkDefinition = {
 	id: string
 	unlockMetaLevel: number

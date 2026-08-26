@@ -20,6 +20,8 @@ export type MonsterResource = {
 	hitStunMs: number
 	/** 보스: 벌목과 무관하게 상시 추격하고 전용 보상을 준다 */
 	isBoss: boolean
+	/** 엘리트 접두사 ID (미지정 = 평범한 개체). 씬 레이어가 이름 표기/오라 색에 사용한다 */
+	eliteId?: string
 	/** 원거리 종족: 이 사거리에서 멈춰 투사체를 날린다 (미지정 = 근접 전용) */
 	rangedRange?: number
 	/** 도주 종족: 체력 비율이 이 값 이하로 내려가면 도주한다 (겁 많은 종족) */
@@ -36,6 +38,29 @@ export type SpeciesBehavior = {
 	fleeHealthRatio?: number
 	/** 원거리 공격: 이 사거리에서 멈춰 투사체를 날린다 */
 	ranged?: { range: number; projectileSpeed: number }
+}
+
+/**
+ * 엘리트 접두사: 리스폰 몬스터에 한 번 적용되는 개체 강화.
+ * 오라 색(color)으로 관전자가 위험도를 읽을 수 있게 한다. 미지정 배율은 1.
+ */
+export type ElitePrefix = {
+	id: string
+	/** 오라 색 (hex). 씬 레이어가 모델 emissive에 입힌다. */
+	color?: string
+	speedMultiplier?: number
+	healthMultiplier?: number
+	attackMultiplier?: number
+	attackCooldownMultiplier?: number
+	detectionMultiplier?: number
+}
+
+/** 엘리트 확률 파라미터 (ELITE_CONFIG 형태) */
+export type EliteChanceConfig = {
+	firstTier: number
+	baseChance: number
+	chancePerTier: number
+	chanceCap: number
 }
 
 export type MonsterAgentState = 'idle' | 'patrol' | 'tendPlants' | 'chase' | 'attack' | 'hit' | 'flee' | 'death'
@@ -176,6 +201,44 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 export function tierStatScale(tierNumber: number, scalePerTier?: number): number {
 	if (!scalePerTier || scalePerTier <= 1) return 1
 	return Math.pow(scalePerTier, Math.max(0, tierNumber - 1))
+}
+
+// ===== 엘리트 몬스터: 티어 게이팅된 접두사 개체 =====
+
+/** 현재 티어에서의 엘리트 리스폰 확률 (0..cap). 첫 티어 미만이면 0. */
+export function eliteChanceForTier(tierNumber: number, config: EliteChanceConfig): number {
+	if (tierNumber < config.firstTier) return 0
+	const raw = config.baseChance + (tierNumber - config.firstTier) * config.chancePerTier
+	return Math.min(config.chanceCap, Math.max(0, raw))
+}
+
+/**
+ * 이미 확률 판정을 통과했다는 전제로 접두사 하나를 고른다.
+ * random은 [0,1) 난수 — 인덱스 매핑이 결정적이라 테스트에서 mock하기 쉽다.
+ * 목록이 비으면 null (호출자는 평범한 개체를 유지한다).
+ */
+export function pickElitePrefix<T extends ElitePrefix>(prefixes: readonly T[], random: number): T | null {
+	if (!prefixes.length) return null
+	const index = Math.floor(random * prefixes.length) % prefixes.length
+	return prefixes[index] ?? prefixes[0]
+}
+
+/**
+ * 리소스에 접두사 배율을 적용한 "새" 리소스를 반환한다 (입력은 변경하지 않는다).
+ * 스탯은 팩토리들과 동일하게 반올림해 정수로 유지한다. eliteId가 기록된다.
+ */
+export function applyElitePrefix(resource: MonsterResource, prefix: ElitePrefix): MonsterResource {
+	const health = Math.round(resource.health * (prefix.healthMultiplier ?? 1))
+	return {
+		...resource,
+		eliteId: prefix.id,
+		maxHealth: health,
+		health,
+		speed: resource.speed * (prefix.speedMultiplier ?? 1),
+		attackDamage: Math.round(resource.attackDamage * (prefix.attackMultiplier ?? 1)),
+		attackCooldownMs: Math.round(resource.attackCooldownMs * (prefix.attackCooldownMultiplier ?? 1)),
+		detectionRadius: Math.round(resource.detectionRadius * (prefix.detectionMultiplier ?? 1)),
+	}
 }
 
 /**

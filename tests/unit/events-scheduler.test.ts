@@ -85,4 +85,58 @@ describe('eventsForDay', () => {
     expect(eventsForDay(config, 5).some(event => event.type === 'goldenTree')).toBe(true)
     expect(eventsForDay(config, 6).some(event => event.type === 'goldenTree')).toBe(false)
   })
+
+  it('기상 이변: 설정이 없으면 절대 발생하지 않는다', () => {
+    // weather 필드 미설정 (기본) — 습격일에도 이변은 없다
+    expect(eventsForDay(makeConfig(), 5).some(event => event.type === 'weather')).toBe(false)
+    // intervalDays가 0 이하면 나눌 수 없으므로 이변 없음
+    const zeroInterval = makeConfig({ weatherFirstDay: 1, weatherIntervalDays: 0 })
+    expect(eventsForDay(zeroInterval, 100).some(event => event.type === 'weather')).toBe(false)
+  })
+
+  it('기상 이변: 첫 날 이전과 주기 외의 날에는 발생하지 않는다', () => {
+    // (day - 4) % 9 === 0 → day ∈ {4, 13, 22, ...}, firstDay 12 → 13부터
+    const config = makeConfig({ weatherFirstDay: 12, weatherIntervalDays: 9, weatherOffsetDays: 4 })
+
+    expect(eventsForDay(config, 11).some(event => event.type === 'weather')).toBe(false) // 첫 날 전
+    expect(eventsForDay(config, 12).some(event => event.type === 'weather')).toBe(false) // 주기 아님
+    expect(eventsForDay(config, 14).some(event => event.type === 'weather')).toBe(false)
+  })
+
+  it('기상 이변: 주기마다 붉은 달/안개가 번갈아 온다', () => {
+    const config = makeConfig({ weatherFirstDay: 12, weatherIntervalDays: 9, weatherOffsetDays: 4 })
+    // day 13: cycle 1 → 홀수 → fog. day 22: cycle 2 → 짝수 → bloodMoon. day 31: cycle 3 → fog.
+    expect(eventsForDay(config, 13)).toContainEqual({ type: 'weather', kind: 'fog' })
+    expect(eventsForDay(config, 22)).toContainEqual({ type: 'weather', kind: 'bloodMoon' })
+    expect(eventsForDay(config, 31)).toContainEqual({ type: 'weather', kind: 'fog' })
+    // 결정론 확인
+    expect(eventsForDay(config, 22)).toEqual(eventsForDay(config, 22))
+  })
+
+  it('기상 이변: 오프셋 생략 시 day % interval 기준으로 판정한다', () => {
+    const config = makeConfig({ weatherFirstDay: 3, weatherIntervalDays: 9 })
+    // offset 0 → day 9 배수마다. day 9: cycle 1 → fog.
+    expect(eventsForDay(config, 3)).toEqual([]) // cycle 0은 firstDay(3) < 9라 해당 없음 — day 3은 (3-0)%9≠0
+    expect(eventsForDay(config, 18)).toContainEqual({ type: 'weather', kind: 'bloodMoon' }) // cycle 2
+  })
+
+  it('기상 이변: 음수 사이클 방어 — 첫 날이 오프셋보다 앞서도 안전하다', () => {
+    // day=1, offset=10, interval=9 → (1-10) = -9 % 9 === 0 이지만 cycle -1 → 미발생 가지
+    const config = makeConfig({ weatherFirstDay: 1, weatherIntervalDays: 9, weatherOffsetDays: 10 })
+    expect(eventsForDay(config, 1).some(event => event.type === 'weather')).toBe(false)
+  })
+
+  it('습격과 기상 이변이 같은 날 겹칠 수 있다 (순서 유지)', () => {
+    // day 30: 습격(30%5===0) + 이변((30-4)%9===0? 26%9=8 → 아니고...) → 이변 없음 검증 대신
+    // 겹치는 날을 찾자: day ≡ 0 (mod 5), (day-4) ≡ 0 (mod 9) → day=40: 40%5=0 ✓, 36%9=0 ✓, ≥12 ✓
+    const config = makeConfig({
+      goldenTreeChance: 0,
+      weatherFirstDay: 12,
+      weatherIntervalDays: 9,
+      weatherOffsetDays: 4,
+    })
+    const events = eventsForDay(config, 40)
+    expect(events.map(event => event.type)).toEqual(['nightRaid', 'weather'])
+    expect(events[1]).toMatchObject({ type: 'weather', kind: 'bloodMoon' }) // cycle floor(36/9)=4 → 짝수
+  })
 })

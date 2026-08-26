@@ -327,6 +327,54 @@ export const MONSTER_CONFIG = {
   } as Record<string, import('~/game/resources/monsters').SpeciesBehavior>,
 };
 
+// ===== 엘리트 몬스터 (티어 게이팅 콘텐츠 #1) =====
+// 티어가 오를수록 접두사 개체("신속한 고블린" 등)가 더 자주 나온다. 스탯은 접두사별 배율,
+// 보상은 강해진 체력에 비례해 자동 증가한다. 관전자는 오라 색으로 "피해야 할 놈"을 읽는다.
+export const ELITE_CONFIG = {
+  firstTier: 3,        // 이 티어부터 엘리트가 등장한다
+  baseChance: 0.12,    // 첫 엘리트 티어에서의 리스폰당 출현 확률
+  chancePerTier: 0.03, // 티어당 확률 증가분
+  chanceCap: 0.35,     // 확률 상한 (후반에도 대부분은 평범한 몬스터여야 한다)
+  prefixes: [
+    // 신속한: 빠르게 붙지만 물집은 얇다
+    { id: 'swift', color: '#7dfcff', speedMultiplier: 1.35, healthMultiplier: 1.25 },
+    // 견고한: 느리게 물러나지 않고 아프다
+    { id: 'brute', color: '#ff8a5c', healthMultiplier: 1.8, attackMultiplier: 1.4 },
+    // 교활한: 멀리서도 알아보고 자주 때린다
+    { id: 'cunning', color: '#c77dff', detectionMultiplier: 1.6, attackCooldownMultiplier: 0.7 },
+  ] as import('~/game/resources/monsters').ElitePrefix[],
+}
+
+// ===== 기상 이변 (티어 게이팅 콘텐츠 #2) =====
+// 일정 주기로 하루 전체의 전술을 바꾼다. 스케줄러(events/scheduler.ts)가 결정론 산출하고,
+// 씬 레이어가 현재 티어가 firstTier 이상일 때만 적용한다.
+export const WEATHER_CONFIG = {
+  firstTier: 4,          // 이 티어부터 기상 이변이 시작된다
+  intervalDays: 9,       // day % intervalDays === offset 인 날 이변이 온다
+  offsetDays: 4,         // 습격일(day % 5 === 0)과 겹치지 않게 어긋난 오프셋
+  // 붉은 달: 몬스터 탐지 확대 + 처치 경험치 증가 — 사냥 리듬이 거칠어지는 날
+  bloodMoonDetectionMultiplier: 1.3,
+  bloodMoonExpMultiplier: 1.5,
+  // 짙은 안개: 플레이어 시야 축소(안개 렌더) + 몬스터 경계 완화 — 잠입형 벌목의 날
+  fogScanMultiplier: 0.6,
+  fogDetectionMultiplier: 0.75,
+}
+
+// ===== 티어 환경 톤: 티어마다 월드 안개 색이 순환해 "새 스테이지" 인상을 준다 =====
+export const TIER_TONE_CONFIG = {
+  colors: ['#aebf9f', '#8fae9b', '#b09a8a', '#8a94b0', '#a08fb0', '#b0a284'],
+  fogNearFactor: 0.55,   // world radius 대비 안개 시작 거리
+  fogFarFactor: 2.2,     // world radius 대비 안개 끝 거리
+}
+
+// ===== 오프라인 진행: 종료 시점부터 최대 capHours까지 목재/메타 XP를 추정 지급한다 =====
+export const OFFLINE_PROGRESS_CONFIG = {
+  capHours: 8,             // 지급 상한 시간
+  woodPerMinuteBase: 0.5,  // 분당 기본 목재
+  woodPerTier: 0.25,       // 티어당 분당 목재 가산 (성장할수록 방치 효율 상승)
+  metaXpPerHour: 5,        // 시간당 메타 XP (소액 — 실제 플레이가 항상 이득)
+}
+
 // ===== 2·3단계 고도화: 일일 이벤트 / 성향 프리셋 / 카메라 연출 / 건축 =====
 
 // 일일 이벤트 스케줄러: day별 이벤트를 seed 기반으로 결정론 산출한다.
@@ -339,6 +387,11 @@ export const EVENT_CONFIG = {
   raidCountGrowthPerDay: 0.4,   // 경과 일차당 습격 규모 증가
   goldenTreeChance: 0.4,        // 하루당 황금 나무 등장 확률 (seeded)
   goldenTreeWoodBonus: 12,      // 황금 나무 벌목 보너스 나무
+  // 기상 이변 케이던스: (day - offsetDays) % intervalDays === 0 인 날, 주기마다 붉은 달/안개 번갈아.
+  // 티어 게이팅(WEATHER_CONFIG.firstTier)은 씬 레이어가 담당한다.
+  weatherFirstDay: 12,
+  weatherIntervalDays: 9,
+  weatherOffsetDays: 4,
 };
 
 // 성향 프리셋: 레벨업 스탯 분배 가중치. 플레이어는 시작 시 3택하고 이후 자동 성장한다.
