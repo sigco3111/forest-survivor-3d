@@ -2353,3 +2353,193 @@ describe('player balance floor/ceiling', () => {
     expect(agent.weaponTier).toBe(20)
   })
 })
+
+describe('player status effects', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('bleed ticks damage the player on schedule and can be lethal', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    // 비전투 회복이 출혈 검증을 방해하지 않도록 0으로 고정
+    const agent = createPlayerAgent([0, 0], makeConfig({ regenHealthAmount: 0 }))
+    agent.applyStatusEffect({ kind: 'bleed', potency: 3, durationMs: 6000, tickIntervalMs: 1000 }, 0)
+    expect(agent.statuses).toHaveLength(1)
+
+    agent.update(0.5, 500) // 아직 첫 틱 전
+    expect(agent.health).toBe(100)
+
+    agent.update(0.5, 1_000) // 첫 틱 도래
+    expect(agent.health).toBe(97)
+
+    agent.health = 4
+    agent.update(0.5, 1_500) // 다음 틱까지 절반 — 무피해
+    expect(agent.health).toBe(4)
+
+    agent.update(0.5, 2_000) // 두 번째 틱
+    expect(agent.health).toBe(1)
+
+    // 출혈은 회피/받는 피해 감산 없는 고정 피해다 — 0이 되면 사망 처리
+    agent.update(0.5, 2_500)
+    expect(agent.health).toBe(1) // 세 번째 틱 전
+
+    agent.update(0.5, 3_000)
+    expect(agent.health).toBe(0)
+    expect(agent.playerAlive).toBe(false)
+  })
+
+  it('drops an expired bleed without firing its pending tick', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const agent = createPlayerAgent([0, 0], makeConfig({ regenHealthAmount: 0 }))
+    agent.applyStatusEffect({ kind: 'bleed', potency: 3, durationMs: 1200, tickIntervalMs: 1000 }, 0)
+
+    agent.update(1.1, 1_100) // 첫 틱(3) 후 잔존
+    expect(agent.health).toBe(97)
+    expect(agent.statuses).toHaveLength(1)
+
+    agent.update(0.2, 1_300) // 만료 프레임 — 미응현 틱은 무효
+    expect(agent.statuses).toHaveLength(0)
+    expect(agent.health).toBe(97)
+  })
+
+  it('reapplying a bleed keeps the max potency and the longer expiry schedule', () => {
+    const agent = createPlayerAgent([0, 0], makeConfig())
+    agent.applyStatusEffect({ kind: 'bleed', potency: 2, durationMs: 2000, tickIntervalMs: 800 }, 0)
+    agent.applyStatusEffect({ kind: 'bleed', potency: 5, durationMs: 9000, tickIntervalMs: 400 }, 1_000)
+
+    expect(agent.statuses).toHaveLength(1)
+    expect(agent.statuses[0]).toMatchObject({
+      kind: 'bleed',
+      potency: 5,
+      expiresAt: 10_000,
+      tickIntervalMs: 400,
+      nextTickInMs: 400,
+    })
+  })
+
+  it('slow statuses multiply the exploration travel distance until they expire', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const slowed = createPlayerAgent([0, 0], makeConfig())
+    slowed.state = 'exploring'
+    slowed.target = [100_000, 0]
+    slowed.applyStatusEffect({ kind: 'slow', potency: 0.5, durationMs: 5000 }, 0)
+
+    const before = [...slowed.position]
+    slowed.update(0.5, 100)
+    const moved = Math.hypot(slowed.position[0] - before[0], slowed.position[1] - before[1])
+    expect(moved).toBeCloseTo(2.5) // speed 10 × slow 0.5 × delta 0.5
+
+    const normal = createPlayerAgent([0, 0], makeConfig())
+    normal.state = 'exploring'
+    normal.target = [100_000, 0]
+    const normalBefore = [...normal.position]
+    normal.update(0.5, 100)
+    const normalMoved = Math.hypot(normal.position[0] - normalBefore[0], normal.position[1] - normalBefore[1])
+    expect(normalMoved).toBeCloseTo(5)
+  })
+
+  it('expired slows stop affecting movement again', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const agent = createPlayerAgent([0, 0], makeConfig())
+    agent.state = 'exploring'
+    agent.target = [100_000, 0]
+    agent.applyStatusEffect({ kind: 'slow', potency: 0.4, durationMs: 300 }, 0)
+
+    agent.update(0.5, 500) // 만료 → 제거
+    expect(agent.statuses).toHaveLength(0)
+
+    const before = [...agent.position]
+    agent.update(0.5, 600)
+    const moved = Math.hypot(agent.position[0] - before[0], agent.position[1] - before[1])
+    expect(moved).toBeCloseTo(5) // 배율 1 복귀
+  })
+
+  it('slam attaches the configured stun recipe as a fourth argument (non-crit)', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.99) // crit 없음
+    const onAttackMonster = vi.fn()
+    const stun = { kind: 'stun' as const, durationMs: 1600 }
+    const threats: PlayerThreatSource[] = [
+      { id: 'a', position: [5, 0], homePosition: [0, 0], activityRadius: 20, speed: 10, attackRadius: 2, health: 50 },
+    ]
+    const cfg = makeConfig({
+      playerAttackDamage: 10,
+      onAttackMonster,
+      threatSources: () => threats,
+      slamUnlockLevel: 1,
+      slamCooldownMs: 100,
+      slamRadius: 100,
+      slamDamageMultiplier: 1,
+      attackDamageMs: 100,
+      attackCooldownMs: 100,
+      slamStatus: stun,
+    })
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.critChance = 0
+
+    agent.update(0, 0)
+
+    expect(onAttackMonster).toHaveBeenCalledTimes(1)
+    expect(onAttackMonster).toHaveBeenCalledWith('a', 10, false, stun)
+  })
+
+  it('slam keeps the crit flag together with the stun recipe on crits', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.01) // critChance=1 → 무조건 crit
+    const onAttackMonster = vi.fn()
+    const stun = { kind: 'stun' as const, durationMs: 1600 }
+    const threats: PlayerThreatSource[] = [
+      { id: 'a', position: [5, 0], homePosition: [0, 0], activityRadius: 20, speed: 10, attackRadius: 2, health: 50 },
+    ]
+    const cfg = makeConfig({
+      playerAttackDamage: 10,
+      onAttackMonster,
+      threatSources: () => threats,
+      slamUnlockLevel: 1,
+      slamCooldownMs: 100,
+      slamRadius: 100,
+      slamDamageMultiplier: 1,
+      attackDamageMs: 100,
+      attackCooldownMs: 100,
+      slamStatus: stun,
+    })
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.critChance = 1
+    agent.critMultiplier = 2
+
+    agent.update(0, 0)
+
+    const call = onAttackMonster.mock.calls.find(candidate => candidate.length === 4)
+    expect(call?.[0]).toBe('a')
+    expect(call?.[2]).toBe(true)
+    expect(call?.[3]).toEqual(stun)
+  })
+
+  it('melee swings without a slam recipe keep their original argument count', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.99)
+    const onAttackMonster = vi.fn()
+    const threats: PlayerThreatSource[] = [
+      { id: 'a', position: [5, 0], homePosition: [0, 0], activityRadius: 20, speed: 10, attackRadius: 2, health: 50 },
+    ]
+    const cfg = makeConfig({
+      playerAttackDamage: 10,
+      onAttackMonster,
+      threatSources: () => threats,
+      slamUnlockLevel: 1,
+      slamCooldownMs: 100,
+      slamRadius: 100,
+      slamDamageMultiplier: 1,
+      attackDamageMs: 100,
+      attackCooldownMs: 100,
+      // slamStatus 미설정
+    })
+    const agent = createPlayerAgent([0, 0], cfg)
+    agent.critChance = 0
+
+    agent.update(0, 0) // slam (레시피 없음 → 2인자)
+    expect(onAttackMonster).toHaveBeenCalledWith('a', 10)
+
+    onAttackMonster.mockClear()
+    agent.update(1, 1_000) // 일반 스윙 도달
+    const swingCall = onAttackMonster.mock.calls.at(-1)
+    expect(swingCall).toEqual(['a', 10])
+  })
+})

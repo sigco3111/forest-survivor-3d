@@ -974,4 +974,165 @@ describe('monster agent', () => {
     expect(respawned.fleeHealthRatio).toBe(0.25)
     expect(respawned.rangedRange).toBe(70)
   })
+
+  it('carries status infliction recipes from speciesBehavior into spawned and respawned monsters', () => {
+    const meleeStatus = { kind: 'bleed' as const, potency: 3, durationMs: 6000, tickIntervalMs: 1000 }
+    const rangedStatus = { kind: 'slow' as const, potency: 0.55, durationMs: 4000 }
+    const config = {
+      modelUrls: ['/demon.glb'],
+      seed: 7,
+      count: 2,
+      radiusMeters: 500,
+      scaleRange: [1, 1] as [number, number],
+      patrolRadius: 80,
+      speed: 22,
+      detectionRadius: 120,
+      attackRadius: 20,
+      health: 100,
+      attackDamage: 10,
+      attackCooldownMs: 1_000,
+      activityRadius: 170,
+      modelScale: 6,
+      hitStunMs: 700,
+      speciesBehavior: {
+        Demon: {
+          ranged: { range: 70, projectileSpeed: 110, status: rangedStatus },
+          meleeStatus,
+        },
+      } as Record<string, import('../../src/game/resources/monsters').SpeciesBehavior>,
+    }
+
+    const [spawned] = createMonsterResources(config)
+    expect(spawned.rangedStatus).toEqual(rangedStatus)
+    expect(spawned.meleeStatus).toEqual(meleeStatus)
+
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const respawned = createRespawnMonster(config, 'respawn-2', 0, 1)
+    expect(respawned.rangedStatus).toEqual(rangedStatus)
+    expect(respawned.meleeStatus).toEqual(meleeStatus)
+  })
+
+  it('a slammed (stunned) monster stops chasing/attacking until the stun wears off', () => {
+    const stun = { kind: 'stun' as const, durationMs: 1600 }
+    const hitContext = makeContext({
+      playerIsChopping: true,
+      incomingPlayerHits: [{ id: 'monster', damage: 17, status: stun }],
+    })
+    const resource = makeResource({ health: 100, attackCooldownMs: 1_000, position: [0, 0], speed: 10 })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'chase'
+    agent.target = [50, 0]
+
+    // 기절 부여 프레임: 피해 + hit 유사 상태
+    agent.update(0, 1_000, hitContext)
+    expect(resource.health).toBe(83)
+    expect(agent.state).toBe('hit')
+    expect(agent.animation).toBe('hit')
+    expect(agent.statuses).toHaveLength(1)
+
+    // 기절 지속 중: chase 컨텍스트여도 제자리 — 이동도 공격도 없다
+    const frozenPosition = [...agent.position]
+    agent.update(0.1, 1_100, makeContext({ playerIsChopping: true }))
+    expect(agent.state).toBe('hit')
+    expect(agent.position).toEqual(frozenPosition)
+
+    // 기절 만료 후: hit 경직 타이머를 거쳐 추격 재개
+    agent.update(0.55, 2_650, makeContext({ playerIsChopping: true })) // 만료 프레임, hitTimer 550ms
+    expect(agent.state).toBe('hit') // 아직 hitStunMs(700) 미달
+    agent.update(0.15, 2_800, makeContext({ playerIsChopping: true }))
+    expect(agent.state).toBe('chase')
+    expect(agent.animation).toBe('run')
+    expect(agent.statuses).toHaveLength(0)
+  })
+
+  it('stun takes priority over the flee response of cowering species', () => {
+    const stun = { kind: 'stun' as const, durationMs: 1600 }
+    const context = makeContext({
+      playerIsChopping: true,
+      incomingPlayerHits: [{ id: 'monster', damage: 90, status: stun }],
+    })
+    const resource = makeResource({ health: 100, maxHealth: 100, fleeHealthRatio: 0.25 })
+    const agent = createMonsterAgent(resource)
+    agent.state = 'attack'
+
+    agent.update(0, 1_000, context)
+
+    // 체력 10/100 → 도주 임계(25) 이하지만 기절이 우선한다
+    expect(resource.health).toBe(10)
+    expect(agent.state).toBe('hit')
+    expect(agent.statuses.map(status => status.kind)).toEqual(['stun'])
+  })
+
+  it('bleed ticks damage the monster over time and can finish it off', () => {
+    const resource = makeResource({ health: 5 })
+    const agent = createMonsterAgent(resource)
+    agent.statuses.push({ kind: 'bleed', potency: 3, expiresAt: 60_000, tickIntervalMs: 1000, nextTickInMs: 0 })
+
+    agent.update(0.5, 10_000, makeContext({ playerIsChopping: false }))
+    expect(resource.health).toBe(2)
+    expect(agent.state).not.toBe('death')
+
+    agent.update(0.5, 10_500, makeContext({ playerIsChopping: false }))
+    expect(resource.health).toBe(-1)
+    expect(agent.state).toBe('death')
+    expect(agent.animation).toBe('death')
+  })
+
+  it('slow statuses multiply the movement speed used by moveToward', () => {
+    const context = makeContext({ playerIsChopping: false })
+    const slowed = createMonsterAgent(makeResource({ speed: 10 }))
+    slowed.state = 'patrol'
+    slowed.position = [0, 0]
+    slowed.target = [100, 0]
+    slowed.statuses.push({ kind: 'slow', potency: 0.5, expiresAt: 60_000 })
+
+    slowed.update(0.5, 0, context)
+    expect(slowed.position[0]).toBeCloseTo(2.5) // 10 × 0.5 × 0.5
+
+    const normal = createMonsterAgent(makeResource({ speed: 10 }))
+    normal.state = 'patrol'
+    normal.position = [0, 0]
+    normal.target = [100, 0]
+    normal.update(0.5, 0, context)
+    expect(normal.position[0]).toBeCloseTo(5)
+  })
+
+  it('passes species status recipes through melee and ranged attacks', () => {
+    const onAttackPlayer = vi.fn()
+    const meleeStatus = { kind: 'bleed' as const, potency: 3, durationMs: 6000, tickIntervalMs: 1000 }
+    const meleer = createMonsterAgent(makeResource({ attackCooldownMs: 1_000, meleeStatus }))
+    meleer.state = 'attack'
+    meleer.lastAttackTime = 0
+
+    meleer.update(0, 1_000, makeContext({ onAttackPlayer }))
+    expect(onAttackPlayer).toHaveBeenCalledWith(meleeStatus)
+
+    const onRangedAttack = vi.fn()
+    const rangedStatus = { kind: 'slow' as const, potency: 0.55, durationMs: 4000 }
+    const caster = createMonsterAgent(makeResource({ attackCooldownMs: 1_000, rangedRange: 70, rangedStatus }))
+    caster.state = 'attack'
+    caster.position = [0, 0]
+    caster.lastAttackTime = 0
+    // 원거리 유지 사거리(20 < 거리 ≤ 70)에서 공격 지속
+    caster.update(0, 1_000, makeContext({ onRangedAttack, playerPosition: [40, 0] }))
+
+    expect(onRangedAttack).toHaveBeenCalledTimes(1)
+    const call = onRangedAttack.mock.calls[0]
+    expect(call[0]).toEqual([0, 0])
+    expect(call[1]).toEqual([40, 0])
+    expect(call[2]).toBe(caster.resource.attackDamage)
+    expect(call[3]).toEqual(rangedStatus)
+  })
+
+  it('attacks without a recipe still call onAttackPlayer with a single argument', () => {
+    const onAttackPlayer = vi.fn()
+    const plain = createMonsterAgent(makeResource({ attackCooldownMs: 1_000 }))
+    plain.state = 'attack'
+    plain.lastAttackTime = 0
+
+    plain.update(0, 1_000, makeContext({ onAttackPlayer }))
+
+    expect(onAttackPlayer).toHaveBeenCalledTimes(1)
+    expect(onAttackPlayer.mock.calls[0]).toHaveLength(0)
+  })
 })

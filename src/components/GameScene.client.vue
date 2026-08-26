@@ -62,6 +62,12 @@
 				:class="`damage-popup--${popup.kind}`"
 				:style="popup.style"
 			>{{ popup.text }}</div>
+			<div
+				v-for="statusIcon in monsterStatusIcons"
+				:key="`status-${statusIcon.id}`"
+				class="monster-status"
+				:style="statusIcon.style"
+			>{{ statusIcon.icons }}</div>
 		</div>
 		<div class="language-switcher" role="group" :aria-label="t('language.label')">
 			<button type="button" :class="{ active: locale === 'en' }" @click="changeLocale('en')">{{ t('language.english') }}</button>
@@ -106,6 +112,14 @@
 			<div class="player-status__row">
 				<span class="player-status__label">{{ t('hud.status.state') }}</span>
 				<span class="player-status__value" :class="`player-status__value--${status.state}`">{{ stateLabel }}</span>
+			</div>
+			<div v-if="playerStatusKinds.length > 0" class="player-status__effects" aria-live="polite">
+				<span
+					v-for="(kind, index) in playerStatusKinds"
+					:key="`${kind}-${index}`"
+					class="player-status__effect"
+					:title="kind"
+				>{{ STATUS_ICONS[kind] }}</span>
 			</div>
 			<div class="player-status__row">
 				<span class="player-status__label">{{ t('hud.status.preset') }}</span>
@@ -288,6 +302,7 @@ import {
 	PROGRESSION_CONFIG,
 	SKILL_CONFIG,
 	SKILL_TREE_CONFIG,
+	STATUS_EFFECT_CONFIG,
 	TIER_TONE_CONFIG,
 	TREE_RESOURCE_CONFIG,
 	WEAPON_CONFIG,
@@ -356,6 +371,7 @@ import { createMasteryState, emptyMasteryBonus, recordKill, toApplication, type 
 import { applyRawXp, applyRunXp, availablePerks, computeRunXp, emptyMetaState, loadMetaState, META_CONFIG, reconcileUnlockedPerks, saveMetaState, startBonusFor, type MetaState, type StartBonus } from '~/game/meta-progression'
 import { computeOfflineGain, isMeaningfulOfflineGain, type OfflineGain } from '~/game/offline-progress'
 import { loadRunState, saveRunState, clearRunState, type RunSaveState } from '~/game/save'
+import type { StatusEffectKind, StatusInfliction } from '~/game/combat/status-effects'
 
 defineOptions({
 	name: 'GameScene',
@@ -413,12 +429,22 @@ const nextBossLabel = computed(() => nextBossInDays.value === 0
 // ===== 몬스터 HP바 + 데미지 팝업 오버레이 =====
 type MonsterBarView = { id: string; style: Record<string, string>; percent: number }
 type DamagePopupView = { id: number; kind: 'damage' | 'hurt'; text: string; createdAt: number; style: Record<string, string> }
+/** 몬스터 머리 위 활성 상태이상 아이콘 (기절/출혈/둔화) */
+type MonsterStatusView = { id: string; icons: string; style: Record<string, string> }
 
 const monsterBars = ref<MonsterBarView[]>([])
 const damagePopups = ref<DamagePopupView[]>([])
+const monsterStatusIcons = ref<MonsterStatusView[]>([])
 let popupSeq = 0
 const POPUP_LIFETIME_MS = 900
 const MONSTER_BAR_HEIGHT = 8 // 몬스터 머리 위 오프셋 (모델 높이 ≈ 6)
+const STATUS_ICON_HEIGHT = 13 // HP바 위 한 단계 올린 높이
+// 상태이상 종류 → 표시 아이콘. 오버레이 전용 매핑 (게임 로직과 무관)
+const STATUS_ICONS: Record<StatusEffectKind, string> = {
+	stun: '💫',
+	bleed: '🩸',
+	slow: '🐌',
+}
 
 // 월드 좌표 → 화면 픽셀 좌표. 카메라 뒤쪽이면 visible=false
 function projectWorldToScreen(x: number, y: number, z: number): { left: number; top: number; visible: boolean } {
@@ -449,13 +475,28 @@ function updateMonsterOverlay() {
 
 	if (!camera) {
 		monsterBars.value = []
+		monsterStatusIcons.value = []
 		return
 	}
 
 	const bars: MonsterBarView[] = []
+	const statusViews: MonsterStatusView[] = []
 	for (const agent of monsterAgents) {
 		const resource = agent.resource
 		if (resource.health <= 0) continue
+
+		// 상태이상 보유 몬스터는 체력과 무관하게 아이콘을 표시한다 (기절 중 평온 개체도 보이게)
+		if (agent.statuses.length > 0) {
+			const statusPoint = projectWorldToScreen(agent.position[0], STATUS_ICON_HEIGHT, agent.position[1])
+			if (statusPoint.visible) {
+				statusViews.push({
+					id: resource.id,
+					icons: agent.statuses.map(statusEffect => STATUS_ICONS[statusEffect.kind]).join(''),
+					style: { left: `${statusPoint.left}px`, top: `${statusPoint.top}px` },
+				})
+			}
+		}
+
 		// 피해를 입었거나 전투 중인 몬스터만 표시
 		const hostile = agent.state === 'chase' || agent.state === 'attack' || agent.state === 'hit'
 		if (resource.health >= resource.maxHealth && !hostile) continue
@@ -470,6 +511,7 @@ function updateMonsterOverlay() {
 		})
 	}
 	monsterBars.value = bars
+	monsterStatusIcons.value = statusViews
 }
 
 // ===== 플레이어 상태 창: FSM 상태/체력/전투력/레벨/타겟/주변 위협을 매 프레임 노출 =====
@@ -524,6 +566,9 @@ const status = ref<PlayerStatusSnapshot>({
 
 // 생명력 비율: 실제 HP / 최대 체력
 const lifeRatio = computed(() => Math.min(1, status.value.life / status.value.lifeMax))
+
+// 플레이어에게 걸린 상태이상 (updatePlayerStatus가 매 프레임 미러링 — 아이콘 표시용)
+const playerStatusKinds = ref<StatusEffectKind[]>([])
 
 const stateLabel = computed(() => t(STATUS_STATE_KEYS[status.value.state] ?? 'hud.status.states.exploring'))
 
@@ -591,6 +636,7 @@ function updatePlayerStatus() {
 			? t('hud.status.preyLine', { model: nearestPrey.resource.modelName, power: nearestPrey.strength, distance: nearestPrey.distance })
 			: '',
 	}
+	playerStatusKinds.value = agent.statuses.map(statusEffect => statusEffect.kind)
 }
 
 let animationFrame = 0
@@ -749,7 +795,7 @@ function createScene() {
 	projectileManager = createProjectileManager(
 		{ speedUnitsPerSecond: projectileSpeed },
 		{
-			onHit: (damage: number) => {
+			onHit: (damage: number, inflictedStatus?: StatusInfliction) => {
 				if (!playerAgent) return
 				const dodged = playerAgent.applyDamage(damage)
 				if (dodged) {
@@ -761,6 +807,11 @@ function createScene() {
 				dayDamageTaken += damage
 				spawnDamagePopup(playerAgent.position[0], 8, playerAgent.position[1], `-${damage}`, 'hurt')
 				logEvent(t('hud.log.hurt', { count: damage }), 'hurt')
+				// 악마 투사체 명중 = 둔화 주입 (회피에 막히지 않은 타격 기준)
+				if (inflictedStatus && playerAgent.playerAlive) {
+					playerAgent.applyStatusEffect(inflictedStatus, gameNow)
+					logEvent(t('hud.log.slow'), 'hurt')
+				}
 				if (!playerAgent.playerAlive) {
 					deathCause.value = 'slain'
 					playerAlive.value = false
@@ -936,8 +987,9 @@ function createEnvObjects(targetScene: Scene) {
 // 리스폰 대기열: 처치된 몬스터의 모델 인덱스와 부활 예정일
 const pendingRespawns: { dueDay: number; modelIndex: number }[] = []
 let respawnSeq = 0
-// 플레이어 스윙/광역 스킬 → 다음 updateMonsters에서 FSM이 처리할 피해 패킷 목록
-let pendingPlayerHits: { id: string; damage: number }[] = []
+// 플레이어 스윙/광역 스킬 → 다음 updateMonsters에서 FSM이 처리할 피해 패킷 목록.
+// status가 실리면(광역 강타 = 기절) 피해와 함께 몬스터에 상태이상이 주입된다.
+let pendingPlayerHits: { id: string; damage: number; status?: StatusInfliction }[] = []
 // 처치 보상 중복 지급 방지 + 사망 연출 중인 시체 (id → 연출 시작 시각)
 const settledKills = new Set<string>()
 const dyingMonsters = new Map<string, number>()
@@ -1100,12 +1152,13 @@ function plantTreeAtPosition(position: PlanePoint) {
 }
 
 // 玩家攻击怪物回调：스윙 시점 기록 → 다음 updateMonsters에서 FSM이 피해/사망을 처리한다
-// agent의 attackRoll이 이미 crit/flat 규칙을 적용해 finalDamage를 계산했으므로 여기서는 popup과 �만 책임진다.
-function handlePlayerAttack(monsterId: string, damage: number, isCrit: boolean = false) {
+// agent의 attackRoll이 이미 crit/flat 규칙을 적용해 finalDamage를 계산했으므로 여기서는 popup과 큐만 책임진다.
+// infliction(광역 강타 = 기절)은 피해 패킷에 실어 FSM이 상태이상까지 주입하게 한다.
+function handlePlayerAttack(monsterId: string, damage: number, isCrit: boolean = false, infliction?: StatusInfliction) {
 	const agent = monsterAgents.find(candidate => candidate.resource.id === monsterId)
 	if (!agent || agent.resource.health <= 0) return
 	spawnDamagePopup(agent.position[0], 8, agent.position[1], `-${damage}${isCrit ? '!' : ''}`, 'damage')
-	pendingPlayerHits.push({ id: monsterId, damage })
+	pendingPlayerHits.push({ id: monsterId, damage, status: infliction })
 	// 생명 흡수 스킬: 해준 피해의 일부 회복
 	playerAgent?.applyLifeLeech(damage)
 }
@@ -1420,7 +1473,9 @@ function createPlayer(targetScene: Scene, preset: PlayerPresetId) {
 		attackDamageMs: PLAYER_CONFIG.attackDamageMs,
 		attackCooldownMs: PLAYER_CONFIG.attackCooldownMs,
 		playerAttackDamage: PLAYER_ATTACK_DAMAGE,
-		onAttackMonster: (monsterId, damage, isCrit) => handlePlayerAttack(monsterId, damage, isCrit),
+		onAttackMonster: (monsterId, damage, isCrit, infliction) => handlePlayerAttack(monsterId, damage, isCrit, infliction),
+		// 광역 강타 명중 몬스터를 기절시킨다 (상태이상 시스템의 플레이어 측 발경 경로)
+		slamStatus: { kind: 'stun', durationMs: STATUS_EFFECT_CONFIG.stunDurationMs },
 		playerMaxHealth: PLAYER_CONFIG.maxHealth,
 		killHealHealth: PLAYER_CONFIG.killHealHealth,
 		regenHealthAmount: PLAYER_CONFIG.regenHealthAmount,
@@ -1562,6 +1617,11 @@ function renderFrame() {
 	playerAgent.update(delta, now)
 	syncPlayerVisuals()
 
+	// 상태이상(출혈 틱)으로 체력이 0이 된 경우 — 몬스터 타격 콜백과 별개 경로라 여기서 마무리한다
+	if (!playerAgent.playerAlive && !gameOver.value) {
+		endRun('slain')
+	}
+
 	if (playerAgent.woodCollected !== prevWood) {
 		woodCount.value = Math.max(0, playerAgent.woodCollected)
 		// 일일 성과 집계: 증가분만 가산 (소모/강화는 집계에서 제외)
@@ -1657,11 +1717,12 @@ function updateMonsters(delta: number, now: number) {
 		// 울타리: 몬스터가 직진으로 막히면 ±π/6·±π/3·±π/2 팬으로 우회 시도 (MONSTER_DETOUR_OFFSETS).
 		obstacleCheck: buildingManager ? pos => buildingManager!.blocks(pos) : undefined,
 		// 원거리 종족 (Demon 등) 발사: 게임 로직의 projectile manager로 위임 (시각화도 거기서).
-		onRangedAttack: projectileManager ? (from, to, damage) => {
-			projectileManager!.spawn(from, to, damage)
+		// 투사체에 둔화 레시피가 실려 명중 시 플레이어에게 주입된다.
+		onRangedAttack: projectileManager ? (from, to, damage, status) => {
+			projectileManager!.spawn(from, to, damage, status)
 		} : undefined,
 		incomingPlayerHits: pendingPlayerHits,
-		onAttackPlayer: () => {
+		onAttackPlayer: (inflictedStatus?: StatusInfliction) => {
 			// 몬스터 공격: 나무 대신 체력을 깎는다 (HP 0 = 사망)
 			if (!playerAgent) return
 			const dodged = playerAgent.applyDamage(MONSTER_CONFIG.attackDamage)
@@ -1674,6 +1735,12 @@ function updateMonsters(delta: number, now: number) {
 			dayDamageTaken += MONSTER_CONFIG.attackDamage
 			spawnDamagePopup(playerAgent.position[0], 8, playerAgent.position[1], `-${MONSTER_CONFIG.attackDamage}`, 'hurt')
 			logEvent(t('hud.log.hurt', { count: MONSTER_CONFIG.attackDamage }), 'hurt')
+			// 종족 상태이상 (Skeleton 근접 = 출혈): 회피와 무관하게 타격 성공 시 주입된다
+			if (inflictedStatus && playerAgent.playerAlive) {
+				playerAgent.applyStatusEffect(inflictedStatus, gameNow)
+				// 플레이어에게 주입되는 상태는 출혈/둔화뿐이다 (기절은 광역 강타 → 몬스터 전용)
+				logEvent(t(inflictedStatus.kind === 'slow' ? 'hud.log.slow' : 'hud.log.bleed'), 'hurt')
+			}
 			if (!playerAgent.playerAlive) {
 				endRun('slain')
 			}
@@ -2530,6 +2597,8 @@ function disposeScene() {
 	pendingPlayerHits = []
 	monsterBars.value = []
 	damagePopups.value = []
+	monsterStatusIcons.value = []
+	playerStatusKinds.value = []
 	fadingTrees.length = 0
 	deadTreeTemplates.clear()
 	liveTreeTemplates.clear()
@@ -2610,6 +2679,29 @@ function disposeScene() {
 	100% {
 		opacity: 0;
 		transform: translateY(-34px) scale(1);
+	}
+}
+
+// 몬스터 머리 위 활성 상태이상 아이콘 (기절/출혈/둔화)
+.monster-status {
+	position: absolute;
+	padding: 0 3px;
+	border-radius: 8px;
+	background: rgba(3, 12, 24, 0.62);
+	font-size: 12px;
+	line-height: 16px;
+	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+	transform: translate(-50%, -100%);
+	animation: monster-status-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes monster-status-pulse {
+	0%,
+	100% {
+		opacity: 0.85;
+	}
+	50% {
+		opacity: 1;
 	}
 }
 
@@ -2907,6 +2999,19 @@ function disposeScene() {
 	justify-content: space-between;
 	font-size: 11px;
 	line-height: 1.55;
+}
+
+// 플레이어에게 걸린 상태이상 아이콘 행 (출혈/둔화)
+.player-status__effects {
+	display: flex;
+	gap: 4px;
+	margin: 2px 0;
+	font-size: 13px;
+	line-height: 1.2;
+}
+
+.player-status__effect {
+	filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.7));
 }
 
 .player-status__label {

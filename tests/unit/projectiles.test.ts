@@ -116,4 +116,28 @@ describe('projectile manager', () => {
     manager.update(1)
     expect(onHit).toHaveBeenCalledTimes(1)
   })
+
+  it('delivers the carried status recipe to onHit on impact', () => {
+    const onHit = vi.fn()
+    const manager = createProjectileManager({ speedUnitsPerSecond: 100 }, { onHit })
+    const slow = { kind: 'slow' as const, potency: 0.55, durationMs: 4000 }
+
+    manager.spawn([0, 0], [10, 0], 7, slow)
+    expect(manager.active()[0]?.status).toEqual(slow)
+
+    manager.update(1)
+    expect(onHit).toHaveBeenCalledTimes(1)
+    expect(onHit).toHaveBeenCalledWith(7, slow)
+  })
+
+  it('keeps single-argument onHit calls for projectiles without a status recipe', () => {
+    const onHit = vi.fn()
+    const manager = createProjectileManager({ speedUnitsPerSecond: 100 }, { onHit })
+
+    manager.spawn([0, 0], [10, 0], 5)
+    manager.update(1)
+
+    expect(onHit).toHaveBeenCalledTimes(1)
+    expect(onHit.mock.calls[0]).toHaveLength(1)
+  })
 })

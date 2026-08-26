@@ -98,6 +98,21 @@ export const SKILL_CONFIG = {
   leechRatio: 0.3,
 };
 
+// ===== 상태이상: 광역 강타 기절 / 스켈레톤 출혈 / 악마 둔화 =====
+// 순수 규칙은 src/game/combat/status-effects.ts, 발경 경로는 MONSTER_CONFIG.speciesBehavior와
+// 플레이어 에이전트의 slamStatus로 주입된다. 수치는 전부 여기서만 튜닝한다.
+export const STATUS_EFFECT_CONFIG = {
+  // 기절(stun): 광역 강타(slam) 명중 몬스터 행동 정지 (hit 유사 처리)
+  stunDurationMs: 1600,
+  // 출혈(bleed): Skeleton 근접 타격 → 플레이어가 틱마다 potency만큼 피해
+  bleedDurationMs: 6000,
+  bleedPotencyPerTick: 3,
+  bleedTickIntervalMs: 1000,
+  // 둔화(slow): Demon 원거리 투사체 명중 → 플레이어 이동속도 배율
+  slowDurationMs: 4000,
+  slowSpeedMultiplier: 0.55,
+}
+
 // ===== Tier 2: 스킬트리 (3 브랜치 × 3 노드) =====
 // 레벨 임계 도달 시 자동으로 노드가 해금되어 누적 효과를 받는다. 같은 노드는 중복 발동되지 않는다.
 export const SKILL_TREE_CONFIG = {
@@ -316,14 +331,26 @@ export const MONSTER_CONFIG = {
   cowerDurationMs: 9000,           // 도주 종료 후 이 시간까지 재추격하지 않는다 (겁먹은 상태)
   // 종족별 행동 특화: 같은 스탯이라도 느낌이 다르게 (미등록 종족은 배율 1)
   // - fleeHealthRatio: 체력이 이 비율 이하로 깎이면 도주한다 (겁 많은 종족)
-  // - ranged: 이 사거리에서 멈춰 투사체를 날린다 (원거리 종족)
+  // - ranged: 이 사거리에서 멈춰 투사체를 날린다 (원거리 종족). status = 명중 시 대상에게 주입되는 상태이상
+  // - meleeStatus: 근접 공격 명중 시 대상(플레이어)에게 주입되는 상태이상
   speciesBehavior: {
     Goblin: { speedMultiplier: 1.25, attackCooldownMultiplier: 0.8, fleeHealthRatio: 0.25 },
-    Skeleton: { speedMultiplier: 0.85, attackDamageMultiplier: 1.5 },
+    Skeleton: {
+      speedMultiplier: 0.85,
+      attackDamageMultiplier: 1.5,
+      meleeStatus: { kind: 'bleed', potency: STATUS_EFFECT_CONFIG.bleedPotencyPerTick, durationMs: STATUS_EFFECT_CONFIG.bleedDurationMs, tickIntervalMs: STATUS_EFFECT_CONFIG.bleedTickIntervalMs },
+    },
     Zombie: {},
     Yeti: { speedMultiplier: 1.35 },
     Giant: { attackDamageMultiplier: 1.3, attackCooldownMultiplier: 1.3 },
-    Demon: { detectionMultiplier: 1.3, ranged: { range: 70, projectileSpeed: 110 } },
+    Demon: {
+      detectionMultiplier: 1.3,
+      ranged: {
+        range: 70,
+        projectileSpeed: 110,
+        status: { kind: 'slow', potency: STATUS_EFFECT_CONFIG.slowSpeedMultiplier, durationMs: STATUS_EFFECT_CONFIG.slowDurationMs },
+      },
+    },
   } as Record<string, import('~/game/resources/monsters').SpeciesBehavior>,
 };
 

@@ -15,6 +15,14 @@ import {
 	type PassiveTreeState,
 } from './passive-tree'
 import { applySkillNodeEffects, findNewUnlocks } from './skill-tree'
+import {
+	applyStatus,
+	makeStatus,
+	slowFactorFor,
+	updateStatuses,
+	type StatusEffect,
+	type StatusInfliction,
+} from '../combat/status-effects'
 
 export type PlayerAgentState = 'exploring' | 'approaching' | 'chopping' | 'fleeing' | 'attacking' | 'hunting'
 
@@ -84,7 +92,10 @@ export type PlayerAgentConfig = {
 	attackDamageMs: number        // 攻击挥砍动画耗时（毫秒）
 	attackCooldownMs: number      // 攻击之间的冷却（毫秒）
 	playerAttackDamage: number    // 单次攻击伤害
-	onAttackMonster?: (monsterId: string, damage: number, isCrit?: boolean) => void
+	/** 몬스터 피해 콜백. infliction이 실리면(광역 강타의 기절 등) 해당 몬스터에 상태이상을 부여한다 */
+	onAttackMonster?: (monsterId: string, damage: number, isCrit?: boolean, infliction?: StatusInfliction) => void
+	/** 광역 강타 명중 시 대상에게 주입되는 상태이상 레시피 (미지정 = 상태 없음) */
+	slamStatus?: StatusInfliction
 	playerMaxHealth: number           // 플레이어 최대 체력
 	killHealHealth: number            // 몬스터 처치 시 체력 회복량
 	regenHealthAmount: number         // 비전투 중 체력 회복량 (틱당)
@@ -215,10 +226,14 @@ export type PlayerAgent = {
 	pendingPassiveUnlocks: string[]
 	/** 무기 강화 최대 티어 (config로 주입, 0 = 무제한). */
 	weaponMaxTier: number
+	/** 활성 상태이상 (출혈/둔화). update()가 매 프레임 만료를 정리한다. */
+	statuses: StatusEffect[]
 
 	update(delta: number, now: number): void
 	/** 피해를 입힌다. 회피 시 true를 반환하고 피해는 적용되지 않는다. 체력이 0이 되면 playerAlive = false (사망). */
 	applyDamage(amount: number): boolean
+	/** 상태이상을 부여한다 (같은 종류는 남은 지속시간/potency max 병합). */
+	applyStatusEffect(infliction: StatusInfliction, now: number): void
 	/** 몬스터 처치 보상으로 체력을 회복한다(최대치까지). */
 	applyKillHeal(): void
 	/** 처치 경험치를 누적한다. 기준치를 넘으면 레벨업(공격력/체력/속도 증가)이 연속 발동한다. */
@@ -331,6 +346,7 @@ export function createPlayerAgent(
 		pendingPassiveUnlocks: [],
 		weaponMaxTier: config.weaponMaxTier ?? 0,
 		failedAreaAttempt: null,
+		statuses: [],
 
 		applyDamage(amount: number): boolean {
 			// 회피 판정: dodgeChance로 Math.random 임계 (씬 레이어가 아닌 모델 내 결정성 보존 목적)
@@ -343,6 +359,10 @@ export function createPlayerAgent(
 			this.health = Math.max(0, this.health - reduced)
 			if (this.health <= 0) this.playerAlive = false
 			return false
+		},
+
+		applyStatusEffect(infliction, now) {
+			this.statuses = applyStatus(this.statuses, makeStatus(infliction, now))
 		},
 
 		applyKillHeal() {
@@ -495,6 +515,16 @@ export function createPlayerAgent(
 		update(delta, now) {
 			if (!this.playerAlive) return
 			pruneAvoidedAreas(this, now)
+
+			// 상태이상 진행: 만료 정리 + 출혈 틱 피해.
+			// 출혈은 회피/받는 피해 감산을 우회하는 고정 피해다 (치유로 상쇄될 뿐).
+			const statusTick = updateStatuses(this.statuses, delta * 1000, now)
+			this.statuses = statusTick.statuses
+			if (statusTick.tickDamage > 0) {
+				this.health = Math.max(0, this.health - statusTick.tickDamage)
+				if (this.health <= 0) this.playerAlive = false
+			}
+
 			// 나무가 충분하면 즉시 무기를 강화한다 (나무 = 휘발성 자원 → 영구 전투력 전환)
 			while (this.upgradeWeapon()) { /* 여러 단계 연속 강화 */ }
 
@@ -543,7 +573,7 @@ export function createPlayerAgent(
 					if (isDeadThreat(threat)) continue
 					if (distanceTo(this.position, threat.position) <= config.slamRadius) {
 						if (handler === undefined) continue
-						deliverAttack(handler, threat.id ?? '', finalDamage, isCrit)
+						deliverAttack(handler, threat.id ?? '', finalDamage, isCrit, config.slamStatus)
 					}
 				}
 			}
@@ -894,7 +924,8 @@ function moveToward(agent: PlayerAgent, delta: number, config: PlayerAgentConfig
 
 	if (distance < 1) return true
 
-	const travelDistance = Math.min(distance, config.speed * delta)
+	// 둔화(slow) 상태이상이 있으면 이동 거리에 가장 강한 배율이 곱해진다
+	const travelDistance = Math.min(distance, config.speed * slowFactorFor(agent.statuses) * delta)
 	const baseAngle = Math.atan2(dx, dz)
 
 	for (const offset of DETOUR_OFFSETS) {
@@ -1255,15 +1286,18 @@ function distanceTo(from: PlanePoint, to: PlanePoint): number {
 }
 
 /**
- * onAttackMonster 콜백을 호출한다. crit이면 3번째 인자 true를, 아니면 2개만 전달한다.
- * 분기 카운트를 명확히 분리하기 위해 별도 함수로 추출했다.
+ * onAttackMonster 콜백을 호출한다. 기존 소비자의 정확 인자 검증을 깨지 않도록
+ * 실제로 값이 있을 때만 인자를 덧붙인다 (crit → 3번째, 상태이상 → 4번째).
  */
 function deliverAttack(
-	handler: (monsterId: string, damage: number, isCrit?: boolean) => void,
+	handler: (monsterId: string, damage: number, isCrit?: boolean, infliction?: StatusInfliction) => void,
 	monsterId: string,
 	damage: number,
 	isCrit: boolean,
+	infliction?: StatusInfliction,
 ): void {
-	if (isCrit) handler(monsterId, damage, true)
-	else handler(monsterId, damage)
+	if (!isCrit && infliction === undefined) handler(monsterId, damage)
+	else if (!isCrit) handler(monsterId, damage, false, infliction)
+	else if (infliction === undefined) handler(monsterId, damage, true)
+	else handler(monsterId, damage, true, infliction)
 }

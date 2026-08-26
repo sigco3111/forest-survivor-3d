@@ -1,5 +1,14 @@
 import { MONSTER_CONFIG, MONSTER_GUARDIAN_CONFIG } from '../../config'
 import type { PlanePoint } from '../resources/trees'
+import {
+	applyStatus,
+	isStunned,
+	makeStatus,
+	slowFactorFor,
+	updateStatuses,
+	type StatusEffect,
+	type StatusInfliction,
+} from '../combat/status-effects'
 
 export type MonsterResource = {
 	id: string
@@ -24,6 +33,10 @@ export type MonsterResource = {
 	eliteId?: string
 	/** 원거리 종족: 이 사거리에서 멈춰 투사체를 날린다 (미지정 = 근접 전용) */
 	rangedRange?: number
+	/** 원거리 투사체 명중 시 대상에게 주입되는 상태이상 (미지정 = 없음) */
+	rangedStatus?: StatusInfliction
+	/** 근접 공격 명중 시 대상(플레이어)에게 주입되는 상태이상 (미지정 = 없음) */
+	meleeStatus?: StatusInfliction
 	/** 도주 종족: 체력 비율이 이 값 이하로 내려가면 도주한다 (겁 많은 종족) */
 	fleeHealthRatio?: number
 }
@@ -36,8 +49,10 @@ export type SpeciesBehavior = {
 	detectionMultiplier?: number
 	/** 체력이 이 비율 이하로 깎이면 도주한다 (겁 많은 종족) */
 	fleeHealthRatio?: number
-	/** 원거리 공격: 이 사거리에서 멈춰 투사체를 날린다 */
-	ranged?: { range: number; projectileSpeed: number }
+	/** 원거리 공격: 이 사거리에서 멈춰 투사체를 날린다. status는 명중 시 대상에게 주입된다 */
+	ranged?: { range: number; projectileSpeed: number; status?: StatusInfliction }
+	/** 근접 공격 명중 시 대상(플레이어)에게 주입되는 상태이상 */
+	meleeStatus?: StatusInfliction
 }
 
 /**
@@ -77,13 +92,14 @@ export type MonsterUpdateContext = {
 	/**
 	 * 플레이어의 스윙(및 광역 스킬)이 이 프레임에 겨냥한 몬스터 목록. 유일한 플레이어 공격 경로다.
 	 * 스윙 쿨다운(플레이어 에이전트)이 공격 빈도를 제한하므로 몬스터 쿨다운과 경쟁하지 않는다.
+	 * status가 실려 있으면(광역 강타의 기절 등) 피해와 함께 상태이상이 주입된다.
 	 */
-	incomingPlayerHits?: { id: string; damage: number }[]
-	onAttackPlayer: () => void
+	incomingPlayerHits?: { id: string; damage: number; status?: StatusInfliction }[]
+	onAttackPlayer: (inflictedStatus?: StatusInfliction) => void
 	/** 울타리 같은 장애물 판정. 제공되면 이동 시 우회를 시도하고 완전히 막히면 제자리에 머문다. */
 	obstacleCheck?: (position: PlanePoint) => boolean
-	/** 원거리 종족의 투사체 발사 (근접 사거리 밖에서 쿨다운마다 호출) */
-	onRangedAttack?: (from: PlanePoint, targetPosition: PlanePoint, damage: number) => void
+	/** 원거리 종족의 투사체 발사 (근접 사거리 밖에서 쿨다운마다 호출). status는 명중 시 주입 레시피 */
+	onRangedAttack?: (from: PlanePoint, targetPosition: PlanePoint, damage: number, status?: StatusInfliction) => void
 }
 
 export type MonsterAgent = {
@@ -100,6 +116,8 @@ export type MonsterAgent = {
 	provokedUntil: number
 	/** 겁먹은 상태: 도주 종료 후 이 시각까지 재추격하지 않는다 */
 	coweredUntil: number
+	/** 활성 상태이상 (기절/출혈/둔화). update()가 매 프레임 만료를 정리한다 */
+	statuses: StatusEffect[]
 	tendTarget: PlanePoint | null
 	tendTimer: number
 	plantCallback: ((position: PlanePoint) => void) | null
@@ -186,6 +204,8 @@ export function createMonsterResources(config: MonsterConfig): MonsterResource[]
 		hitStunMs: config.hitStunMs,
 		isBoss: false,
 		rangedRange: behavior.ranged?.range,
+		rangedStatus: behavior.ranged?.status,
+		meleeStatus: behavior.meleeStatus,
 		fleeHealthRatio: behavior.fleeHealthRatio,
 	})
 }
@@ -317,6 +337,8 @@ export function createRespawnMonster(
 		hitStunMs: config.hitStunMs,
 		isBoss: false,
 		rangedRange: behavior.ranged?.range,
+		rangedStatus: behavior.ranged?.status,
+		meleeStatus: behavior.meleeStatus,
 		fleeHealthRatio: behavior.fleeHealthRatio,
 	}
 }
@@ -337,6 +359,7 @@ export function createMonsterAgent(
 		hitTimer: 0,
 		provokedUntil: 0,
 		coweredUntil: 0,
+		statuses: [],
 		tendTarget: null,
 		tendTimer: 0,
 		plantCallback: plantCallback ?? null,
@@ -350,25 +373,59 @@ export function createMonsterAgent(
 				return
 			}
 
-			// 플레이어의 스윙 처리: 피해 적용 → 사망 / 겁에 질린 도주 / 경직(hit)
+			// 상태이상 진행: 만료 정리 + 출혈 틱 피해 (출혈 사망도 정식 사망 경로로 정산된다)
+			const statusTick = updateStatuses(this.statuses, delta * 1000, now)
+			this.statuses = statusTick.statuses
+			if (statusTick.tickDamage > 0) {
+				this.resource.health -= statusTick.tickDamage
+				if (this.resource.health <= 0) {
+					this.state = 'death'
+					this.animation = 'death'
+					return
+				}
+			}
+
+			// 플레이어의 스윙 처리: 피해 적용 → 사망 / 기절 / 겁에 질린 도주 / 경직(hit)
 			const incoming = context.incomingPlayerHits?.find(hit => hit.id === this.resource.id)
 			if (incoming && incoming.damage > 0) {
 				this.resource.health -= incoming.damage
 				if (this.resource.health <= 0) {
 					this.state = 'death'
 					this.animation = 'death'
-				} else if (
-					this.resource.fleeHealthRatio !== undefined
-					&& this.resource.health <= this.resource.maxHealth * this.resource.fleeHealthRatio
-				) {
-					// 도주 종족: 체력이 임계 비율 아래로 떨어지면 경직 대신 도주한다
-					startFleeingFromPlayer(this, context)
 				} else {
-					this.state = 'hit'
-					this.animation = 'hit'
-					this.hitTimer = 0
-					this.target = [...context.playerPosition]
+					// 광역 강타 등이 실어 온 상태이상을 먼저 주입한다
+					if (incoming.status) {
+						this.statuses = applyStatus(this.statuses, makeStatus(incoming.status, now))
+					}
+					if (isStunned(this.statuses)) {
+						// 기절은 경직/도주보다 우선 — hit 유사 상태로 행동 정지한다
+						this.state = 'hit'
+						this.animation = 'hit'
+						this.hitTimer = 0
+						this.target = [...context.playerPosition]
+					} else if (
+						this.resource.fleeHealthRatio !== undefined
+						&& this.resource.health <= this.resource.maxHealth * this.resource.fleeHealthRatio
+					) {
+						// 도주 종족: 체력이 임계 비율 아래로 떨어지면 경직 대신 도주한다
+						startFleeingFromPlayer(this, context)
+					} else {
+						this.state = 'hit'
+						this.animation = 'hit'
+						this.hitTimer = 0
+						this.target = [...context.playerPosition]
+					}
 				}
+				return
+			}
+
+			// 기절 지속 중: chase/attack 불가 — 제자리에서 경직 애니메이션만 재생한다.
+			// hitTimer를 계속 0으로 잡아 기절 종료 후 자연스럽게 hit 복귀 경로(추격/복귀 판정)를 탄다.
+			if (isStunned(this.statuses)) {
+				this.state = 'hit'
+				this.animation = 'hit'
+				this.hitTimer = 0
+				this.bearing = faceTarget(this, context.playerPosition)
 				return
 			}
 
@@ -598,9 +655,17 @@ function updateAttack(
 	}
 
 	// 攻击冷却到期 → 命中. 근접 사거리면 밀격, 그 밖이고 원거리 종족면 투사체를 날린다.
+	// 종족 레시피(Skeleton 출혈 / Demon 둔화)가 있으면 인자를 덧붙여 전달한다.
 	if (now - agent.lastAttackTime >= agent.resource.attackCooldownMs) {
 		if (agent.resource.rangedRange !== undefined && distToPlayer > MELEE_ENGAGE_RANGE) {
-			context.onRangedAttack?.([...agent.position], [...context.playerPosition], agent.resource.attackDamage)
+			const rangedStatus = agent.resource.rangedStatus
+			if (rangedStatus !== undefined) {
+				context.onRangedAttack?.([...agent.position], [...context.playerPosition], agent.resource.attackDamage, rangedStatus)
+			} else {
+				context.onRangedAttack?.([...agent.position], [...context.playerPosition], agent.resource.attackDamage)
+			}
+		} else if (agent.resource.meleeStatus !== undefined) {
+			context.onAttackPlayer(agent.resource.meleeStatus)
 		} else {
 			context.onAttackPlayer()
 		}
@@ -727,6 +792,7 @@ const MONSTER_DETOUR_OFFSETS = [
 /**
  * 목표를 향해 이동한다. obstacleCheck가 주어지면 직진이 막힐 때 각도를 벌려 우회를 시도하고,
  * 그마저 전부 막히면 제자리에 머문다(장애물 = 몬스터를 되돌리지 않고 지연시킨다).
+ * 둔화(slow) 상태이상이 있으면 이동 속도에 가장 강한 배율이 곱해진다.
  */
 function moveToward(agent: MonsterAgent, delta: number, obstacleCheck?: (position: PlanePoint) => boolean) {
 	const dx = agent.target[0] - agent.position[0]
@@ -734,7 +800,7 @@ function moveToward(agent: MonsterAgent, delta: number, obstacleCheck?: (positio
 	const distance = Math.hypot(dx, dz)
 	if (distance < 1) return
 
-	const speed = agent.resource.speed * delta
+	const speed = agent.resource.speed * slowFactorFor(agent.statuses) * delta
 	const travelDistance = Math.min(distance, speed)
 	const baseAngle = Math.atan2(dx, dz)
 
