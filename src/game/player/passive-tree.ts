@@ -76,7 +76,12 @@ export function createPassiveTreeState(): PassiveTreeState {
 	}
 }
 
-function triggerMatches(trigger: PassiveTrigger, progress: PassiveProgress): boolean {
+/**
+ * 단일 트리거가 현재 진행을 만족하는지 검사한다.
+ * 업적 시스템(game/achievements)도 같은 문법의 트리거를 평가하므로 공개해 재사용한다.
+ * 모든 조건은 "카운터 ≥ 임계치"이며, 하나라도 못 미치면 false.
+ */
+export function matchesPassiveTrigger(trigger: PassiveTrigger, progress: PassiveProgress): boolean {
 	if (trigger.level !== undefined && progress.level < trigger.level) return false
 	if (trigger.totalKills !== undefined && progress.totalKills < trigger.totalKills) return false
 	if (trigger.bossKills !== undefined && progress.bossKills < trigger.bossKills) return false
@@ -100,7 +105,7 @@ export function findPassiveUnlocks(
 	const already = new Set(state.unlockedIds)
 	return config.nodes.filter(node => {
 		if (already.has(node.id)) return false
-		return triggerMatches(node.trigger, state.progress)
+		return matchesPassiveTrigger(node.trigger, state.progress)
 	})
 }
 

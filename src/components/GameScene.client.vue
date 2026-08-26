@@ -303,6 +303,7 @@ import {
 	SKILL_CONFIG,
 	SKILL_TREE_CONFIG,
 	STATUS_EFFECT_CONFIG,
+	ACHIEVEMENT_CONFIG,
 	TIER_TONE_CONFIG,
 	TREE_RESOURCE_CONFIG,
 	WEAPON_CONFIG,
@@ -368,7 +369,8 @@ import {
 } from '~/game/time/lighting'
 import { eventsForDay, type ScheduledEvent, type WeatherKind } from '~/game/events/scheduler'
 import { createMasteryState, emptyMasteryBonus, recordKill, toApplication, type MasteryState } from '~/game/player/mastery'
-import { applyRawXp, applyRunXp, availablePerks, computeRunXp, emptyMetaState, loadMetaState, META_CONFIG, reconcileUnlockedPerks, saveMetaState, startBonusFor, type MetaState, type StartBonus } from '~/game/meta-progression'
+import { applyRawXp, applyRunXp, availablePerks, computeRunXp, emptyMetaState, loadMetaState, META_CONFIG, reconcileUnlockedPerks, saveMetaState, startBonusFor, unlockAchievements, type MetaState, type StartBonus } from '~/game/meta-progression'
+import { findNewAchievements } from '~/game/achievements'
 import { computeOfflineGain, isMeaningfulOfflineGain, type OfflineGain } from '~/game/offline-progress'
 import { loadRunState, saveRunState, clearRunState, type RunSaveState } from '~/game/save'
 import type { StatusEffectKind, StatusInfliction } from '~/game/combat/status-effects'
@@ -1419,6 +1421,30 @@ function recordRun() {
 	refreshMetaSummary()
 }
 
+// ===== 업적: 패시브 카운터(총 처치/종족별/보스/카드/일차/레벨)를 측정원으로 읽는다 =====
+// 달성 즉시 영구 배지 + 메타 XP 보너스 지급 (applyRawXp 경유 — 런 카운터 무영향).
+// 매 프레임 평가해도 14개 정의의 술어 판정뿐이라 비용이 무시 가능하다.
+function evaluateAndGrantAchievements() {
+	if (!playerAgent || !runStarted.value) return
+	const newly = findNewAchievements(
+		ACHIEVEMENT_CONFIG,
+		playerAgent.passiveTreeState.progress,
+		metaState.unlockedAchievements,
+	)
+	if (newly.length === 0) return
+	let bonusXp = 0
+	for (const definition of newly) bonusXp += Math.max(0, definition.metaXpReward)
+	metaState = unlockAchievements(metaState, newly.map(definition => definition.id), bonusXp)
+	saveMetaState(localStorage, metaState)
+	refreshMetaSummary()
+	for (const definition of newly) {
+		const label = t(`achievement['${definition.id}']`)
+		const message = t('hud.log.achievement', { name: label, xp: definition.metaXpReward })
+		logEvent(message, 'level')
+		showToast(message)
+	}
+}
+
 // 从场景、动画控制器、Agent 列表中移除死亡怪物并释放资源
 function disposeMonster(monsterId: string) {
 	const obj = monsterObjects.get(monsterId)
@@ -1681,6 +1707,8 @@ function renderFrame() {
 		showToast(t('hud.log.passiveUnlock', { name: label }))
 	}
 	playerAgent.pendingPassiveUnlocks = []
+	// 업적 평가: 이번 프레임의 처치/카드/레벨/일차 변화를 즉시 배지+메타 XP로 정산한다
+	evaluateAndGrantAchievements()
 
 	// 4. 现有系统
 	updateFadingTrees(now)

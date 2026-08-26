@@ -6,11 +6,15 @@
  * - v1 필드(totalXp/metaLevel/xpIntoLevel/totalRuns/unlockedSpecies)를 보존한다.
  * - v2에서 추가된 unlockedPerks(영구 해금된 meta perk ID 배열)는 빈 배열로 시작한다.
  * - 메타 레벨이 이미 perk 임계치를 넘었으면 자동으로 해당 perk를 해금해 retroactive 보너스를 받게 한다.
+ *
+ * v2 → v3 마이그레이션:
+ * - v2 필드를 모두 보존하고 unlockedAchievements(영구 업적 배지 ID 배열)를 빈 배열로 추가한다.
  */
 import { META_PERK_CONFIG } from '../config'
 
-export const META_SAVE_VERSION = 2
+export const META_SAVE_VERSION = 3
 const META_SAVE_VERSION_V1 = 1
+const META_SAVE_VERSION_V2 = 2
 export const META_SAVE_KEY = 'forest-survivor-meta:v1'
 
 export const META_CONFIG = {
@@ -37,7 +41,7 @@ export type RunSummary = {
 	goldenTrees: number
 }
 
-/** 영구 저장되는 메타 상태. unlockedPerks는 종족 도감과 같은 영구 해금 집합. */
+/** 영구 저장되는 메타 상태. unlockedPerks/unlockedAchievements는 영구 해금 집합. */
 export type MetaState = {
 	version: number
 	totalXp: number
@@ -46,6 +50,8 @@ export type MetaState = {
 	totalRuns: number
 	unlockedSpecies: string[]
 	unlockedPerks: string[]
+	/** 달성한 업적 정의 ID (ACHIEVEMENT_CONFIG 참조). 정렬·중복 없음. */
+	unlockedAchievements: string[]
 }
 
 export type StartBonus = {
@@ -67,6 +73,7 @@ export function emptyMetaState(): MetaState {
 		totalRuns: 0,
 		unlockedSpecies: [],
 		unlockedPerks: [],
+		unlockedAchievements: [],
 	}
 }
 
@@ -111,6 +118,7 @@ export function applyRunXp(state: MetaState, runXp: number, unlockedSpecies: rea
 		totalRuns: state.totalRuns + 1,
 		unlockedSpecies: mergeSpecies(state.unlockedSpecies, unlockedSpecies),
 		unlockedPerks: mergePerks(state.unlockedPerks, availablePerks(META_PERK_CONFIG, metaLevel)),
+		unlockedAchievements: [...state.unlockedAchievements],
 	}
 }
 
@@ -136,7 +144,19 @@ export function applyRawXp(state: MetaState, xp: number): MetaState {
 		totalRuns: state.totalRuns,
 		unlockedSpecies: [...state.unlockedSpecies],
 		unlockedPerks: mergePerks(state.unlockedPerks, availablePerks(META_PERK_CONFIG, metaLevel)),
+		unlockedAchievements: [...state.unlockedAchievements],
 	}
+}
+
+/**
+ * 업적 배지를 영구 달성 집합에 합치고 보너스 메타 XP를 순수 누적한다.
+ * applyRawXp와 마찬가지로 런 카운터/도감은 건드리지 않는다.
+ * 새로 합쳐진 ID가 없고 보너스 XP도 없으면 입력 state를 그대로 반환한다(저장 생략 신호).
+ */
+export function unlockAchievements(state: MetaState, ids: readonly string[], bonusXp = 0): MetaState {
+	const merged = mergeUniqueSorted(state.unlockedAchievements, ids)
+	if (merged.length === state.unlockedAchievements.length && bonusXp <= 0) return state
+	return applyRawXp({ ...state, unlockedAchievements: merged }, bonusXp)
 }
 
 export type MetaPerkDefinition = {
@@ -224,22 +244,24 @@ export function reconcileUnlockedPerks(state: MetaState, config: MetaPerkConfig)
 	}
 }
 
-function mergeSpecies(existing: readonly string[], additions: readonly string[]): string[] {
+/** 문자열 ID 집합을 정렬·중복 없이 합친 새 배열을 반환한다. */
+function mergeUniqueSorted(existing: readonly string[], additions: readonly string[]): string[] {
 	if (!additions.length) return [...existing]
 	const set = new Set(existing)
-	for (const species of additions) set.add(species)
+	for (const value of additions) set.add(value)
 	return [...set].sort()
+}
+
+function mergeSpecies(existing: readonly string[], additions: readonly string[]): string[] {
+	return mergeUniqueSorted(existing, additions)
 }
 
 function mergePerks(existing: readonly string[], additions: readonly string[]): string[] {
-	if (!additions.length) return [...existing]
-	const set = new Set(existing)
-	for (const perk of additions) set.add(perk)
-	return [...set].sort()
+	return mergeUniqueSorted(existing, additions)
 }
 
-/** v1 payload를 v2 MetaState로 마이그레이션한다. */
-function migrateV1ToV2(raw: Record<string, unknown>): MetaState | null {
+/** v1 payload의 공통 코어 필드를 검증해 되돌린다. 손상 시 null. */
+function validatedLegacyCore(raw: Record<string, unknown>): Pick<MetaState, 'totalXp' | 'metaLevel' | 'xpIntoLevel' | 'totalRuns' | 'unlockedSpecies'> | null {
 	const requiredNumeric = ['totalXp', 'metaLevel', 'xpIntoLevel', 'totalRuns'] as const
 	for (const field of requiredNumeric) {
 		if (!isFiniteNumber(raw[field])) return null
@@ -248,39 +270,50 @@ function migrateV1ToV2(raw: Record<string, unknown>): MetaState | null {
 	if (!Array.isArray(raw.unlockedSpecies)) return null
 	if (!raw.unlockedSpecies.every(s => typeof s === 'string')) return null
 	return {
-		version: META_SAVE_VERSION,
 		totalXp: raw.totalXp as number,
 		metaLevel: raw.metaLevel as number,
 		xpIntoLevel: raw.xpIntoLevel as number,
 		totalRuns: raw.totalRuns as number,
 		unlockedSpecies: [...(raw.unlockedSpecies as string[])],
-		unlockedPerks: [],
 	}
 }
 
-/** v2 payload를 엄격 검증해 MetaState로 파싱한다. */
-function validateAndParseV2(raw: Record<string, unknown>): MetaState | null {
-	const requiredNumeric = ['totalXp', 'metaLevel', 'xpIntoLevel', 'totalRuns'] as const
-	for (const field of requiredNumeric) {
-		if (!isFiniteNumber(raw[field])) return null
-		if ((raw[field] as number) < 0) return null
+/** v1 payload를 현재 버전 MetaState로 마이그레이션한다 (perk/업적 집합은 빈 배열에서 출발). */
+function migrateV1(raw: Record<string, unknown>): MetaState | null {
+	const core = validatedLegacyCore(raw)
+	if (!core) return null
+	return {
+		version: META_SAVE_VERSION,
+		...core,
+		unlockedPerks: [],
+		unlockedAchievements: [],
 	}
-	if (!Array.isArray(raw.unlockedSpecies)) return null
-	if (!raw.unlockedSpecies.every(s => typeof s === 'string')) return null
+}
+
+/** v2 payload를 현재 버전 MetaState로 마이그레이션한다 — perk 집합은 보존, 업적 집합은 새로 추가. */
+function migrateV2ToV3(raw: Record<string, unknown>): MetaState | null {
+	const core = validatedLegacyCore(raw)
+	if (!core) return null
 	if (!Array.isArray(raw.unlockedPerks)) return null
 	if (!raw.unlockedPerks.every(s => typeof s === 'string')) return null
 	return {
 		version: META_SAVE_VERSION,
-		totalXp: raw.totalXp as number,
-		metaLevel: raw.metaLevel as number,
-		xpIntoLevel: raw.xpIntoLevel as number,
-		totalRuns: raw.totalRuns as number,
-		unlockedSpecies: [...(raw.unlockedSpecies as string[])],
+		...core,
 		unlockedPerks: [...(raw.unlockedPerks as string[])],
+		unlockedAchievements: [],
 	}
 }
 
-/** 저장된 메타 JSON 문자열을 검증해 MetaState 또는 null을 반환한다. v1/v2 모두 지원. */
+/** 현재 버전(v3) payload를 엄격 검증해 MetaState로 파싱한다. */
+function validateAndParseCurrent(raw: Record<string, unknown>): MetaState | null {
+	const migrated = migrateV2ToV3(raw)
+	if (!migrated) return null
+	if (!Array.isArray(raw.unlockedAchievements)) return null
+	if (!raw.unlockedAchievements.every(s => typeof s === 'string')) return null
+	return { ...migrated, unlockedAchievements: [...(raw.unlockedAchievements as string[])] }
+}
+
+/** 저장된 메타 JSON 문자열을 검증해 MetaState 또는 null을 반환한다. v1/v2/v3 모두 지원. */
 export function loadMetaState(storage: Pick<Storage, 'getItem'>): MetaState | null {
 	const raw = storage.getItem(META_SAVE_KEY)
 	if (!raw) return null
@@ -291,8 +324,9 @@ export function loadMetaState(storage: Pick<Storage, 'getItem'>): MetaState | nu
 		return null
 	}
 	if (!isPlainObject(parsed)) return null
-	if (parsed.version === META_SAVE_VERSION) return validateAndParseV2(parsed)
-	if (parsed.version === META_SAVE_VERSION_V1) return migrateV1ToV2(parsed)
+	if (parsed.version === META_SAVE_VERSION) return validateAndParseCurrent(parsed)
+	if (parsed.version === META_SAVE_VERSION_V2) return migrateV2ToV3(parsed)
+	if (parsed.version === META_SAVE_VERSION_V1) return migrateV1(parsed)
 	return null
 }
 
@@ -309,6 +343,7 @@ export function saveMetaState(
 		totalRuns: state.totalRuns,
 		unlockedSpecies: state.unlockedSpecies,
 		unlockedPerks: state.unlockedPerks,
+		unlockedAchievements: state.unlockedAchievements,
 	}))
 }
 

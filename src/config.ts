@@ -184,6 +184,34 @@ export const PASSIVE_TREE_CONFIG = {
   ],
 };
 
+// ===== 영구 업적: 패시브 트리 카운터를 측정원으로 읽어 메타 XP를 지급한다 =====
+// 트리거 문법은 PASSIVE_TREE_CONFIG와 동일(level/totalKills/speciesKills/bossKills/cardChoiceCount/dayReached).
+// 달성 즉시 META_CONFIG 경유 XP가 누적되고 배지는 메타 저장소에 영구 기록된다. 런 내 스탯에는 영향 없다.
+// 설계 문서: docs/achievements-proposal.md
+export const ACHIEVEMENT_CONFIG = {
+  definitions: [
+    // 총 처치 축
+    { id: 'kills.100', trigger: { totalKills: 100 }, metaXpReward: 30 },
+    { id: 'kills.500', trigger: { totalKills: 500 }, metaXpReward: 80 },
+    { id: 'kills.1500', trigger: { totalKills: 1500 }, metaXpReward: 200 },
+    // 종족별 축
+    { id: 'goblin.50', trigger: { speciesKills: { name: 'Goblin', count: 50 } }, metaXpReward: 40 },
+    { id: 'skeleton.50', trigger: { speciesKills: { name: 'Skeleton', count: 50 } }, metaXpReward: 40 },
+    { id: 'zombie.50', trigger: { speciesKills: { name: 'Zombie', count: 50 } }, metaXpReward: 40 },
+    { id: 'demon.25', trigger: { speciesKills: { name: 'Demon', count: 25 } }, metaXpReward: 45 },
+    // 보스(=티어 사다리) 축
+    { id: 'boss.5', trigger: { bossKills: 5 }, metaXpReward: 120 },
+    { id: 'boss.15', trigger: { bossKills: 15 }, metaXpReward: 300 },
+    // 레벨업 카드 축
+    { id: 'cards.25', trigger: { cardChoiceCount: 25 }, metaXpReward: 35 },
+    { id: 'cards.75', trigger: { cardChoiceCount: 75 }, metaXpReward: 90 },
+    // 생존 일차 축
+    { id: 'day.15', trigger: { dayReached: 15 }, metaXpReward: 60 },
+    { id: 'day.40', trigger: { dayReached: 40 }, metaXpReward: 150 },
+    { id: 'level.20', trigger: { level: 20 }, metaXpReward: 70 },
+  ],
+} as import('~/game/achievements').AchievementConfig
+
 // ===== 영구 메타 perk (런 종료 시 보너스) =====
 // 메타 레벨 2/5/10/20/30에서 새 perk가 해금되어 다음 런의 시작에 적용된다.
 export const META_PERK_CONFIG = {

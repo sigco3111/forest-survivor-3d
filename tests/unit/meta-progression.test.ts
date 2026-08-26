@@ -14,6 +14,7 @@ import {
 	reconcileUnlockedPerks,
 	saveMetaState,
 	startBonusFor,
+	unlockAchievements,
 	type MetaPerkConfig,
 	type MetaState,
 } from '../../src/game/meta-progression'
@@ -35,6 +36,7 @@ describe('emptyMetaState', () => {
 		expect(s.totalRuns).toBe(0)
 		expect(s.unlockedSpecies).toEqual([])
 		expect(s.unlockedPerks).toEqual([])
+		expect(s.unlockedAchievements).toEqual([])
 	})
 })
 
@@ -163,6 +165,7 @@ describe('save/load round trip', () => {
 			totalRuns: 7,
 			unlockedSpecies: ['Goblin', 'Skeleton'],
 			unlockedPerks: ['vitality'],
+			unlockedAchievements: ['boss.5', 'kills.100'],
 		}
 		saveMetaState(storage, state)
 		expect(loadMetaState(storage)).toEqual(state)
@@ -271,8 +274,8 @@ describe('save/load round trip', () => {
 	})
 })
 
-describe('v1 → v2 migration', () => {
-	it('preserves v1 fields and adds unlockedPerks default', () => {
+describe('v1 → v3 migration', () => {
+	it('preserves v1 fields and adds unlockedPerks/unlockedAchievements defaults', () => {
 		const storage = new MemoryStorage()
 		storage.setItem(META_SAVE_KEY, JSON.stringify({
 			version: 1,
@@ -291,6 +294,7 @@ describe('v1 → v2 migration', () => {
 			totalRuns: 7,
 			unlockedSpecies: ['Goblin', 'Skeleton'],
 			unlockedPerks: [],
+			unlockedAchievements: [],
 		})
 	})
 
@@ -344,6 +348,99 @@ describe('v1 → v2 migration', () => {
 			unlockedSpecies: [1, 2],
 		}))
 		expect(loadMetaState(storage)).toBeNull()
+	})
+})
+
+describe('v2 → v3 migration (achievements field)', () => {
+	function makeV2Payload() {
+		return {
+			version: 2,
+			totalXp: 900,
+			metaLevel: 3,
+			xpIntoLevel: 100,
+			totalRuns: 5,
+			unlockedSpecies: ['Demon'],
+			unlockedPerks: ['edge'],
+		}
+	}
+
+	it('preserves every v2 field and starts achievements empty', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify(makeV2Payload()))
+		const { version: _v2Version, ...v2Fields } = makeV2Payload()
+		expect(loadMetaState(storage)).toEqual({
+			version: META_SAVE_VERSION,
+			...v2Fields,
+			unlockedAchievements: [],
+		})
+	})
+
+	it('rejects a v2 payload with invalid numeric fields', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ ...makeV2Payload(), xpIntoLevel: 'oops' }))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+
+	it('rejects a v2 payload with non-array unlockedPerks', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ ...makeV2Payload(), unlockedPerks: 'vitality' }))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+
+	it('rejects a v3 payload with non-array unlockedAchievements', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ ...makeV2Payload(), version: META_SAVE_VERSION, unlockedAchievements: 'boss.5' }))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+
+	it('rejects a v3 payload with non-string achievement entries', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ ...makeV2Payload(), version: META_SAVE_VERSION, unlockedAchievements: ['boss.5', 7] }))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+
+	it('still rejects unknown versions', () => {
+		const storage = new MemoryStorage()
+		storage.setItem(META_SAVE_KEY, JSON.stringify({ ...makeV2Payload(), version: 99 }))
+		expect(loadMetaState(storage)).toBeNull()
+	})
+})
+
+describe('unlockAchievements', () => {
+	it('merges ids sorted/deduplicated and grants bonus meta XP without counting a run', () => {
+		const before = emptyMetaState()
+		const after = unlockAchievements(before, ['kills.100', 'boss.5', 'kills.100'], 150)
+
+		expect(after.unlockedAchievements).toEqual(['boss.5', 'kills.100'])
+		expect(after.totalXp).toBe(150)
+		expect(after.totalRuns).toBe(0)
+		expect(after.unlockedSpecies).toEqual([])
+
+		// 보너스 XP는 applyRawXp 경로 — 레벨업도 메타 레벨 규칙을 그대로 따른다
+		expect(after.xpIntoLevel).toBe(150)
+	})
+
+	it('keeps previously unlocked badges and existing run counters intact', () => {
+		const before = { ...emptyMetaState(), totalRuns: 4, totalXp: 500, xpIntoLevel: 40 }
+		const after = unlockAchievements(before, ['day.15'], 60)
+
+		expect(after.unlockedAchievements).toEqual(['day.15'])
+		expect(after.totalRuns).toBe(4)
+		expect(after.totalXp).toBe(560)
+	})
+
+	it('records badge ids even when the reward is zero', () => {
+		const before = { ...emptyMetaState(), totalXp: 10, xpIntoLevel: 3 }
+		const after = unlockAchievements(before, ['goblin.50'], 0)
+
+		expect(after.unlockedAchievements).toEqual(['goblin.50'])
+		expect(after.totalXp).toBe(10)
+	})
+
+	it('returns the identical state object when nothing changed', () => {
+		const before = { ...emptyMetaState(), unlockedAchievements: ['kills.100'] }
+		expect(unlockAchievements(before, ['kills.100'], 0)).toBe(before)
+		expect(unlockAchievements(before, [], -5)).toBe(before)
 	})
 })
 
