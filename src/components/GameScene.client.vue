@@ -3205,11 +3205,12 @@ function disposeScene() {
 
 .passive-panel {
 	position: absolute;
-	top: 545px;
+	/* 업적 패널(600 + 155) 아래 자리 — 최대 높이를 155로 막아 화면 하단 침범을 막는다 */
+	top: 770px;
 	left: 20px;
 	z-index: 2;
 	width: 180px;
-	max-height: 190px;
+	max-height: 155px;
 	overflow: auto;
 	padding: 10px 12px;
 	border: 1px solid rgba(53, 244, 255, 0.3);
@@ -3236,10 +3237,10 @@ function disposeScene() {
 }
 
 // 업적 배지 패널: 전체 정의를 나열해 달성/미달성을 상시 보여준다 (트로피 금색 테마)
-// max-height는 750px 오프셋과 합쳐도 화면 하단에 ~30px 여백이 남도록 계산한 값이다.
+// 숙련도 패널(최대 ~590px) 아래, 전투 로그(화면 하단) 위 자리를 쓴다.
 .achievement-panel {
 	position: absolute;
-	top: 750px;
+	top: 600px;
 	left: 20px;
 	z-index: 2;
 	width: 180px;
