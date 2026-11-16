@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@nuxtjs/i18n": "10.6.0",
-    "nuxt": "^3.21.8",
+    "nuxt": "^4.6.4",
     "simplex-noise": "^4.0.3",
     "three": "^0.185.1",
     "unstorage": "^1.17.5",
