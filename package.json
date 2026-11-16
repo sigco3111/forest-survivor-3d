@@ -23,7 +23,7 @@
     "simplex-noise": "^4.0.3",
     "three": "^0.185.1",
     "unstorage": "^1.17.5",
-    "vue": "^3.5.38"
+    "vue": "^3.5.45"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
